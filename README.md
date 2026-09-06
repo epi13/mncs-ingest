@@ -154,7 +154,8 @@ mncs-ingest/
 ├── language/
 │   └── mncs/
 │       └── ingest/         # authoritative MNCS-language policies/modules
-└── schemas/                # portable interchange/validation schemas
+├── schemas/                # portable interchange/validation schemas
+└── tests/                  # semantic convergence and boundary proofs
 ```
 
 The initial repository is architecture-first. Directories contain boundary documentation rather than fake implementations so the first executable slice can be driven by tests and real language pressure.
