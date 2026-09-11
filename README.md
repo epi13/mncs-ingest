@@ -160,6 +160,79 @@ mncs-ingest/
 
 The initial repository is architecture-first. Directories contain boundary documentation rather than fake implementations so the first executable slice can be driven by tests and real language pressure.
 
+## Status: deterministic convergence slice (implemented)
+
+The first vertical slice is executable. Four representations of one
+bounded transfer observation — active text, passive text, structured
+JSON, native MNCS codes — deterministically converge to one canonical
+`mncs-ingest/fragment-v1` fragment (see
+`examples/transfer/canonical.txt`), with provenance preserved and
+semantic-vs-provenance equality separated.
+
+### What works
+
+- Executable semantic IR (`src/ir.rs`): entities, transfer event,
+  objects, quantities, four roles, explicit unknowns, versioned schema.
+- Executed MNCS authority (`language/mncs/ingest*.mncs`, Source Profile
+  0.13): word classification, role assignment, quantity parsing,
+  validation, spelling/codes equality, ordering primitives — all run
+  through the pinned compiler, reference interpreter, and two real
+  backends in tests.
+- Three adapters behind one trait (`src/adapters/`): bounded text
+  ([grammar](docs/GRAMMAR.md)), structured JSON events, native codes.
+- Deterministic canonical bytes, sha256 signal ids, byte-span
+  provenance, `Direct`/`Parsed`/`Uncertain` confidence.
+- Consumer handoff (`src/consumer.rs`): one fragment in, one receipt
+  out; `EchoConsumer` proves decoupling with no memory policy inside
+  ingest.
+- 45 tests pin convergence, separation, determinism, provenance,
+  unknowns, malformed input, adapter equivalence, and MNCS authority
+  (including a policy-mutation test that proves MNCS is in the path).
+
+### What does not work (yet)
+
+- One event kind (`transfer`), two known objects, ≤64-byte sentences.
+- No articles, adverbs, tense beyond the listed verbs, number words
+  past `ten`, or multi-frame observations.
+- Reference-execution latency (~140 ms floor per verdict in release;
+  see `docs/LANGUAGE_PRESSURE.md` P-PERF-01) — fine for tests, not for
+  a high-frequency path; backend-execution integration is future work.
+- JSON is the interchange/debug form; the machine-native encoding is
+  undecided, as the architecture doc always intended.
+
+### Build / run / test
+
+```bash
+cargo build --offline
+cargo test --offline          # full suite (~5 min, MNCS elaboration dominates)
+cargo run --offline --example gen   # regenerate examples/transfer fixtures
+```
+
+MNCS dependencies pin `mncs-language` rev
+`d7cc9536f0507fc34086d8a5784c6177ce5b67b4` (see `Cargo.toml`); the
+`.mncs` sources under `language/` declare Source Profile 0.13.
+
+### Language pressure
+
+Eleven evidence-backed pressures from this implementation live in
+[docs/LANGUAGE_PRESSURE.md](docs/LANGUAGE_PRESSURE.md) — strings and
+spans, maps, fold liveness, strict `select`, nested-module
+diagnostics, stdlib distribution, and measured execution cost.
+
+### Layout
+
+```text
+mncs-ingest/
+├── Cargo.toml / Cargo.lock
+├── src/                     # host carriers: IR, canonical layout, adapters, runtime, consumer
+├── language/mncs/ingest*.mncs  # authoritative MNCS policy (executed, tested)
+├── tests/                   # semantic guarantee suites
+├── examples/transfer/       # convergence fixtures + generator
+├── schemas/fragment-v1.schema.json
+└── docs/ARCHITECTURE.md docs/SEMANTIC_IR.md docs/ROADMAP.md
+    docs/GRAMMAR.md docs/LANGUAGE_PRESSURE.md
+```
+
 ## First implementation target
 
 The first vertical slice should prove one thing well:

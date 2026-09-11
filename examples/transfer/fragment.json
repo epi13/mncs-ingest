@@ -1,0 +1,91 @@
+{
+  "schema": "mncs-ingest/fragment-v1",
+  "atoms": [
+    {
+      "id": 0,
+      "kind": "event",
+      "label": "transfer",
+      "value": null
+    },
+    {
+      "id": 1,
+      "kind": "entity",
+      "label": "Alexander",
+      "value": null
+    },
+    {
+      "id": 2,
+      "kind": "entity",
+      "label": "Finn",
+      "value": null
+    },
+    {
+      "id": 3,
+      "kind": "object",
+      "label": "apple",
+      "value": null
+    },
+    {
+      "id": 4,
+      "kind": "quantity",
+      "label": "3",
+      "value": 3
+    }
+  ],
+  "relations": [
+    {
+      "role": "source",
+      "event": 0,
+      "target": 1
+    },
+    {
+      "role": "target",
+      "event": 0,
+      "target": 2
+    },
+    {
+      "role": "object",
+      "event": 0,
+      "target": 3
+    },
+    {
+      "role": "quantity",
+      "event": 0,
+      "target": 4
+    }
+  ],
+  "unknowns": [],
+  "provenance": {
+    "adapter": "text",
+    "signal_id": "5b65b295946a383316cd235be36ba512d50d8c0535124802042b0b00f0fb1bc8",
+    "interpreter": "mncs.ingest/ingest_parse",
+    "spans": [
+      {
+        "field": "word:verb",
+        "start": 10,
+        "end": 14
+      },
+      {
+        "field": "word:source",
+        "start": 0,
+        "end": 9
+      },
+      {
+        "field": "word:target",
+        "start": 15,
+        "end": 19
+      },
+      {
+        "field": "word:object",
+        "start": 22,
+        "end": 28
+      },
+      {
+        "field": "word:quantity",
+        "start": 20,
+        "end": 21
+      }
+    ],
+    "confidence": "parsed"
+  }
+}

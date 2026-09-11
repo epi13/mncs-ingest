@@ -1,0 +1,11 @@
+mncs-ingest/fragment-v1
+frag:v1
+atom Event transfer -
+atom Entity Alexander -
+atom Entity Finn -
+atom Object apple -
+atom Quantity 3 3
+rel source 0 1
+rel target 0 2
+rel object 0 3
+rel quantity 0 4

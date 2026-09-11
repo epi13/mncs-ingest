@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/epi13/mncs-ingest/schemas/fragment-v1.schema.json",
+  "title": "MNCS Ingest canonical semantic fragment (debug/interchange form)",
+  "description": "Portable JSON encoding of the canonical fragment for debugging, fixtures, and interchange. Semantic authority lives in the typed MNCS structures and the Rust IR; this schema only bounds the interchange form. Version mncs-ingest/fragment-v1.",
+  "type": "object",
+  "required": ["schema", "atoms", "relations", "unknowns", "provenance"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "mncs-ingest/fragment-v1"
+    },
+    "atoms": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "label"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 0 },
+          "kind": { "type": "string", "enum": ["entity", "event", "object", "quantity", "unknown"] },
+          "label": { "type": "string", "minLength": 1, "maxLength": 16 },
+          "value": { "type": ["integer", "null"], "minimum": -999, "maximum": 999 }
+        }
+      }
+    },
+    "relations": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": ["role", "event", "target"],
+        "additionalProperties": false,
+        "properties": {
+          "role": { "type": "string", "enum": ["source", "target", "object", "quantity"] },
+          "event": { "type": "integer", "minimum": 0 },
+          "target": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["adapter", "signal_id", "interpreter", "spans", "confidence"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter": { "type": "string", "enum": ["text", "structured", "native"] },
+        "signal_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "interpreter": { "type": "string", "minLength": 1 },
+        "spans": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["field"],
+            "additionalProperties": false,
+            "properties": {
+              "field": { "type": "string", "minLength": 1 },
+              "start": { "type": ["integer", "null"], "minimum": 0 },
+              "end": { "type": ["integer", "null"], "minimum": 0 }
+            }
+          }
+        },
+        "confidence": { "type": "string", "enum": ["direct", "parsed", "uncertain"] }
+      }
+    }
+  }
+}
