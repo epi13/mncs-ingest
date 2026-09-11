@@ -1,0 +1,66 @@
+mncs 0.13;
+
+// mncs.ingest — facade root compiled and executed by the host runtime.
+//
+// This module owns no policy of its own; it binds the vocabulary,
+// parser, and frame decisions into the single program the host loads,
+// so every ingest verdict executes through one stable entry surface.
+// Policy lives in `mncs.ingest.vocab`, `mncs.ingest.parse`, and
+// `mncs.ingest.frame`.
+module mncs.ingest;
+
+use mncs.ingest.vocab as vocab;
+use mncs.ingest.parse as parse;
+use mncs.ingest.frame as frame;
+
+// Bounded text path: raw sentence bytes in, canonical role spans out.
+fn ingest_parse(text: [byte; up_to 64], length: u64) -> (result: parse.TransferParse) {
+    return parse.parse_transfer(text, length);
+}
+
+// Structured/native path: classify the event spelling; the host passes
+// one word with start 0 through the same span-based tables.
+fn ingest_classify_event(word: [byte; up_to 64], length: u64) -> (result: i64) {
+    return vocab.classify_event(word, 0, length);
+}
+
+fn ingest_classify_object(word: [byte; up_to 64], length: u64) -> (result: i64) {
+    return vocab.classify_object(word, 0, length);
+}
+
+// Structured/native path: validate extracted fields.
+fn ingest_validate(event: i64, src_present: bool, tgt_present: bool, qty_present: bool, qty: i64) -> (result: i64) {
+    return frame.validate_structured(event, src_present, tgt_present, qty_present, qty);
+}
+
+// Equality path: closed-vocabulary codes compare here; open-vocabulary
+// spellings compare through `ingest_spell_equal`. Both verdicts must
+// agree for two fragments to be semantically equal.
+fn ingest_codes_equal(a_event: i64, a_object: i64, a_qty_present: bool, a_qty: i64, b_event: i64, b_object: i64, b_qty_present: bool, b_qty: i64) -> (result: i64) {
+    return frame.codes_equal(a_event, a_object, a_qty_present, a_qty, b_event, b_object, b_qty_present, b_qty);
+}
+
+fn ingest_spell_equal(a: [byte; up_to 64], a_length: u64, b: [byte; up_to 64], b_length: u64) -> (result: i64) {
+    return frame.spell_equal(a, a_length, b, b_length);
+}
+
+// Ordering path: deterministic sort and its orderedness witness over
+// atom-code projections.
+fn ingest_sort_codes(xs: [u64; 8], count: u64) -> (result: [u64; 8]) {
+    return frame.sort_codes(xs, count);
+}
+
+fn ingest_is_sorted(xs: [u64; 8], count: u64) -> (result: i64) {
+    return frame.is_sorted_codes(xs, count);
+}
+
+// Diagnostics entry point: exposes splitter/classifier internals as
+// plain integers [count, verb_idx, verb_count, c0, c1, c2, c3, c4] so
+// host tests can pin the interpretation pipeline stage by stage.
+fn ingest_debug(text: [byte; up_to 64], length: u64) -> (result: [i64; 8]) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    let eff: u64 = parse.effective_length(text, tlen);
+    let split: parse.SplitState = parse.split_words(text, eff);
+    let cls: parse.ClassState = parse.classify_all(text, split);
+    return [split.count as i64, cls.verb_idx, cls.verb_count as i64, cls.classes[0], cls.classes[1], cls.classes[2], cls.classes[3], cls.classes[4]];
+}

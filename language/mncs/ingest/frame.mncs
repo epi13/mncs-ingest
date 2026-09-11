@@ -1,0 +1,97 @@
+mncs 0.13;
+
+// mncs.ingest.frame — validation, equality, and ordering witnesses over
+// canonical transfer codes.
+//
+// The structured and native adapters extract fields on the host (JSON
+// decoding and transport live there) but every semantic verdict here is
+// MNCS: event support, field presence, quantity range, code equality, and
+// byte-exact spelling equality. Quantity presence is part of equality, so
+// a missing quantity never equals an explicit zero.
+module mncs.ingest.frame;
+
+use mncs.ingest.vocab as vocab;
+
+// Shared validator for structured/native input. Statuses reuse the parse
+// contract: 0 ok, 1 unsupported event, 2 missing field, 3 malformed
+// quantity. The object code is already canonical (or unknown) at this
+// point; unknown objects are valid but partial, decided by the host from
+// the code, not by a second policy here.
+fn validate_structured(event: i64, src_present: bool, tgt_present: bool, qty_present: bool, qty: i64) -> (result: i64) {
+    if event != vocab.event_transfer() {
+        return 1;
+    }
+    if vocab.bool_not(src_present) || vocab.bool_not(tgt_present) {
+        return 2;
+    }
+    if qty_present && (qty < 0 || qty > 999) {
+        return 3;
+    }
+    return 0;
+}
+
+// Byte-exact spelling equality for open-vocabulary words. Unlike keyword
+// matching this never folds case: entity identity is spelling-exact.
+fn spell_equal(a: [byte; up_to 64], a_length: u64, b: [byte; up_to 64], b_length: u64) -> (result: i64) {
+    let alen: u64 = select(a_length <= a.len, a_length, a.len);
+    let blen: u64 = select(b_length <= b.len, b_length, b.len);
+    let valid: bool = alen == blen && alen <= 16;
+    iterate i over a carrying same: bool = valid {
+        let live: bool = i < alen && i < blen;
+        let sa: u64 = select(i < a.len, i, 0);
+        let sb: u64 = select(i < b.len, i, 0);
+        next same = same && select(live, a[sa] == b[sb], true);
+    }
+    return select(same, 1, 0);
+}
+
+// Equality over the closed-vocabulary code vector. Open-vocabulary
+// spellings compare through `spell_equal`; the host ANDs the verdicts,
+// so no equality policy lives in the host alone.
+fn codes_equal(a_event: i64, a_object: i64, a_qty_present: bool, a_qty: i64, b_event: i64, b_object: i64, b_qty_present: bool, b_qty: i64) -> (result: i64) {
+    let same: bool = a_event == b_event && a_object == b_object
+        && a_qty_present == b_qty_present
+        && (vocab.bool_not(a_qty_present) || a_qty == b_qty);
+    return select(same, 1, 0);
+}
+
+// Deterministic ordering witness: 1 when the logical window is sorted.
+// The host lays atoms out in sorted order; this witness executes the same
+// policy over code projections in conformance tests.
+fn is_sorted_codes(xs: [u64; 8], count: u64) -> (result: i64) {
+    let n: u64 = select(count <= 8, count, 8);
+    iterate i over xs carrying ok: bool = true {
+        let ahead: bool = i +% 1 < n;
+        let up: u64 = select(i +% 1 < 8, i +% 1, 0);
+        next ok = ok && select(ahead, xs[i] <= xs[up], true);
+    }
+    return select(ok, 1, 0);
+}
+
+// One insertion step: move `xs[at]` left while its predecessor is
+// greater. Positions outside the live window compare false and leave
+// storage untouched, so the step is total for any `count`.
+fn sort_step(xs: [u64; 8], count: u64, at: u64) -> (result: [u64; 8]) {
+    let n: u64 = select(count <= 8, count, 8);
+    iterate j over xs carrying row: [u64; 8] = xs {
+        let k: u64 = at -% j;
+        let live: bool = k > 0 && k < n;
+        let above: u64 = select(k < n, k, 0);
+        let below: u64 = select(k > 0 && k <= n, k -% 1, 0);
+        let swap: bool = live && row[above] < row[below];
+        let placed: u64 = select(swap, row[above], row[below]);
+        let kept: u64 = select(swap, row[below], row[above]);
+        next row = replace(replace(row, above, kept), below, placed);
+    }
+    return row;
+}
+
+// Insertion sort over the logical window. Ordering policy executes here;
+// the host cross-checks its atom layout against this function.
+fn sort_codes(xs: [u64; 8], count: u64) -> (result: [u64; 8]) {
+    let n: u64 = select(count <= 8, count, 8);
+    iterate at over xs carrying row: [u64; 8] = xs {
+        next row = sort_step(row, n, at);
+    }
+    return row;
+}

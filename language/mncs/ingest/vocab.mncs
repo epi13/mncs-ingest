@@ -1,0 +1,414 @@
+mncs 0.13;
+
+// mncs.ingest.vocab — closed-vocabulary tables and byte-level word
+// classifiers for the deterministic convergence slice.
+//
+// Every semantic code in the slice is assigned here, never by host code:
+// event codes, verb-direction codes, object codes, and number values.
+// Open-vocabulary spellings (entity names, unknown object words) pass
+// through as opaque byte spans; this module compares and classifies bytes
+// but never allocates strings, because the language has no string type
+// (see docs/LANGUAGE_PRESSURE.md, P-STRING-01).
+//
+// All classifiers are span-based — `(text, start, length)` — because the
+// language has no substring or view-slicing primitive, so a parser cannot
+// carve a word out of a sentence any other way (P-STRING-02). The
+// structured adapter reuses the same entry points with `start = 0`.
+//
+// Bounds: spans longer than 16 bytes never classify as words; keyword
+// tables are at most 8 bytes. Every function is total: lengths clamp into
+// storage, and strict `select` keeps every projection in range.
+module mncs.ingest.vocab;
+
+// Canonical code: the only event kind in the slice.
+fn event_transfer() -> (result: i64) {
+    return 1;
+}
+
+// Verb direction codes.
+fn verb_active() -> (result: i64) {
+    return 1;
+}
+
+fn verb_passive() -> (result: i64) {
+    return 2;
+}
+
+// Canonical object codes.
+fn object_apple() -> (result: i64) {
+    return 1;
+}
+
+fn object_orange() -> (result: i64) {
+    return 2;
+}
+
+fn object_unknown() -> (result: i64) {
+    return 0;
+}
+
+// Word-class codes returned by `classify_word`.
+fn class_entity() -> (result: i64) {
+    return 1;
+}
+
+fn class_verb_active() -> (result: i64) {
+    return 2;
+}
+
+fn class_verb_passive() -> (result: i64) {
+    return 3;
+}
+
+fn class_number() -> (result: i64) {
+    return 4;
+}
+
+fn class_object() -> (result: i64) {
+    return 5;
+}
+
+fn class_from() -> (result: i64) {
+    return 6;
+}
+
+fn class_candidate() -> (result: i64) {
+    return 7;
+}
+
+fn class_other() -> (result: i64) {
+    return 8;
+}
+
+// A parsed number: `ok` separates "no quantity present" from a quantity
+// of zero further up the pipeline.
+record NumParse {
+    value: i64,
+    ok: bool
+}
+
+fn is_alpha(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return (n >= 65 && n <= 90) || (n >= 97 && n <= 122);
+}
+
+fn is_digit(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n >= 48 && n <= 57;
+}
+
+fn is_upper(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n >= 65 && n <= 90;
+}
+
+fn is_lower(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n >= 97 && n <= 122;
+}
+
+fn to_lower(value: byte) -> (result: byte) {
+    let n: i64 = value as i64;
+    return select(n >= 65 && n <= 90, (n + 32) as byte, value);
+}
+
+fn eq_fold(left: byte, right: byte) -> (result: bool) {
+    return to_lower(left) == to_lower(right);
+}
+
+// Boolean negation as a total function: prefix `!` does not lex below
+// Source Profile 0.13, so every negation in this module is explicit.
+fn bool_not(value: bool) -> (result: bool) {
+    return select(value, false, true);
+}
+
+// One byte of a span, or zero past the end. Callers always pair this with
+// an explicit `live` guard; the zero is only a totality witness.
+fn span_byte(text: [byte; up_to 64], start: u64, length: u64, at: u64) -> (result: byte) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    let pos: u64 = start +% at;
+    let live: bool = at < tlen && pos < text.len;
+    return select(live, text[select(live, pos, 0)], (0) as byte);
+}
+
+// ASCII case-insensitive span equality against a keyword table.
+fn span_eq(text: [byte; up_to 64], start: u64, length: u64, target: [byte; 8], target_length: u64) -> (result: bool) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    let valid: bool = tlen == target_length && target_length <= target.len && tlen <= 16;
+    iterate i over target carrying same: bool = valid {
+        let live: bool = i < target_length && i < tlen;
+        next same = same && select(live, eq_fold(span_byte(text, start, length, i), target[i]), true);
+    }
+    return same;
+}
+
+// Prefix variant used for singular/plural convergence: the first
+// `target_length` span bytes must match the table spelling.
+fn span_prefix_eq(text: [byte; up_to 64], start: u64, length: u64, target: [byte; 8], target_length: u64) -> (result: bool) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    let valid: bool = tlen >= target_length && target_length <= target.len && tlen <= 16;
+    iterate i over target carrying same: bool = valid {
+        let live: bool = i < target_length && i < tlen;
+        next same = same && select(live, eq_fold(span_byte(text, start, length, i), target[i]), true);
+    }
+    return same;
+}
+
+fn token_gave() -> (result: [byte; 8]) {
+    return [(103) as byte, (97) as byte, (118) as byte, (101) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn token_give() -> (result: [byte; 8]) {
+    return [(103) as byte, (105) as byte, (118) as byte, (101) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn token_gives() -> (result: [byte; 8]) {
+    return [(103) as byte, (105) as byte, (118) as byte, (101) as byte, (115) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn token_received() -> (result: [byte; 8]) {
+    return [(114) as byte, (101) as byte, (99) as byte, (101) as byte, (105) as byte, (118) as byte, (101) as byte, (100) as byte];
+}
+
+fn token_receive() -> (result: [byte; 8]) {
+    return [(114) as byte, (101) as byte, (99) as byte, (101) as byte, (105) as byte, (118) as byte, (101) as byte, (0) as byte];
+}
+
+fn token_receives() -> (result: [byte; 8]) {
+    return [(114) as byte, (101) as byte, (99) as byte, (101) as byte, (105) as byte, (118) as byte, (101) as byte, (115) as byte];
+}
+
+fn token_from() -> (result: [byte; 8]) {
+    return [(102) as byte, (114) as byte, (111) as byte, (109) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn token_apple() -> (result: [byte; 8]) {
+    return [(97) as byte, (112) as byte, (112) as byte, (108) as byte, (101) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn token_orange() -> (result: [byte; 8]) {
+    return [(111) as byte, (114) as byte, (97) as byte, (110) as byte, (103) as byte, (101) as byte, (0) as byte, (0) as byte];
+}
+
+fn token_transfer() -> (result: [byte; 8]) {
+    return [(116) as byte, (114) as byte, (97) as byte, (110) as byte, (115) as byte, (102) as byte, (101) as byte, (114) as byte];
+}
+
+fn is_give_verb(text: [byte; up_to 64], start: u64, length: u64) -> (result: bool) {
+    return span_eq(text, start, length, token_gave(), 4)
+        || span_eq(text, start, length, token_give(), 4)
+        || span_eq(text, start, length, token_gives(), 5);
+}
+
+fn is_receive_verb(text: [byte; up_to 64], start: u64, length: u64) -> (result: bool) {
+    return span_eq(text, start, length, token_received(), 8)
+        || span_eq(text, start, length, token_receive(), 7)
+        || span_eq(text, start, length, token_receives(), 8);
+}
+
+fn is_from_word(text: [byte; up_to 64], start: u64, length: u64) -> (result: bool) {
+    return span_eq(text, start, length, token_from(), 4);
+}
+
+// Canonical event classification for the structured adapter: the event
+// spelling crosses as bytes and MNCS decides, so JSON "give"/"gave" and
+// "transfer" converge without host-side tables.
+fn classify_event(text: [byte; up_to 64], start: u64, length: u64) -> (result: i64) {
+    if span_eq(text, start, length, token_transfer(), 8) {
+        return event_transfer();
+    }
+    if is_give_verb(text, start, length) {
+        return event_transfer();
+    }
+    return 0;
+}
+
+// Object classification with singular/plural convergence: "apples"
+// matches "apple" with one trailing s/S stripped. Unknown words stay 0;
+// the host preserves their original spelling as an explicit unknown.
+fn classify_object(text: [byte; up_to 64], start: u64, length: u64) -> (result: i64) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    if span_eq(text, start, length, token_apple(), 5) {
+        return object_apple();
+    }
+    if span_eq(text, start, length, token_orange(), 6) {
+        return object_orange();
+    }
+    if tlen >= 2 && tlen <= 16 {
+        let last: byte = span_byte(text, start, length, tlen -% 1);
+        let stem: u64 = tlen -% 1;
+        if eq_fold(last, (115) as byte) && span_prefix_eq(text, start, stem, token_apple(), 5) && stem == 5 {
+            return object_apple();
+        }
+        if eq_fold(last, (115) as byte) && span_prefix_eq(text, start, stem, token_orange(), 6) && stem == 6 {
+            return object_orange();
+        }
+    }
+    return object_unknown();
+}
+
+fn number_word_one() -> (result: [byte; 8]) {
+    return [(111) as byte, (110) as byte, (101) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_two() -> (result: [byte; 8]) {
+    return [(116) as byte, (119) as byte, (111) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_three() -> (result: [byte; 8]) {
+    return [(116) as byte, (104) as byte, (114) as byte, (101) as byte, (101) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_four() -> (result: [byte; 8]) {
+    return [(102) as byte, (111) as byte, (117) as byte, (114) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_five() -> (result: [byte; 8]) {
+    return [(102) as byte, (105) as byte, (118) as byte, (101) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_six() -> (result: [byte; 8]) {
+    return [(115) as byte, (105) as byte, (120) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_seven() -> (result: [byte; 8]) {
+    return [(115) as byte, (101) as byte, (118) as byte, (101) as byte, (110) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_eight() -> (result: [byte; 8]) {
+    return [(101) as byte, (105) as byte, (103) as byte, (104) as byte, (116) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_nine() -> (result: [byte; 8]) {
+    return [(110) as byte, (105) as byte, (110) as byte, (101) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_ten() -> (result: [byte; 8]) {
+    return [(116) as byte, (101) as byte, (110) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn number_word_zero() -> (result: [byte; 8]) {
+    return [(122) as byte, (101) as byte, (114) as byte, (111) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
+}
+
+fn classify_word_number(text: [byte; up_to 64], start: u64, length: u64) -> (result: NumParse) {
+    if span_eq(text, start, length, number_word_zero(), 4) {
+        return NumParse { value: 0, ok: true };
+    }
+    if span_eq(text, start, length, number_word_one(), 3) {
+        return NumParse { value: 1, ok: true };
+    }
+    if span_eq(text, start, length, number_word_two(), 3) {
+        return NumParse { value: 2, ok: true };
+    }
+    if span_eq(text, start, length, number_word_three(), 5) {
+        return NumParse { value: 3, ok: true };
+    }
+    if span_eq(text, start, length, number_word_four(), 4) {
+        return NumParse { value: 4, ok: true };
+    }
+    if span_eq(text, start, length, number_word_five(), 4) {
+        return NumParse { value: 5, ok: true };
+    }
+    if span_eq(text, start, length, number_word_six(), 3) {
+        return NumParse { value: 6, ok: true };
+    }
+    if span_eq(text, start, length, number_word_seven(), 5) {
+        return NumParse { value: 7, ok: true };
+    }
+    if span_eq(text, start, length, number_word_eight(), 5) {
+        return NumParse { value: 8, ok: true };
+    }
+    if span_eq(text, start, length, number_word_nine(), 4) {
+        return NumParse { value: 9, ok: true };
+    }
+    if span_eq(text, start, length, number_word_ten(), 3) {
+        return NumParse { value: 10, ok: true };
+    }
+    return classify_digits(text, start, length);
+}
+
+// Decimal digits, 1..=3 chars, value 0..=999. Longer digit runs are not
+// silently truncated: they report not-ok so the caller can fail closed.
+fn classify_digits(text: [byte; up_to 64], start: u64, length: u64) -> (result: NumParse) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    if tlen == 0 || tlen > 3 {
+        return NumParse { value: 0, ok: false };
+    }
+    iterate i over text carrying acc: NumParse = NumParse { value: 0, ok: true } {
+        let live: bool = i < tlen;
+        let current: byte = span_byte(text, start, length, i);
+        let digit: bool = is_digit(current);
+        let magnitude: i64 = select(digit, (current as i64) - 48, 0);
+        next acc = NumParse {
+            value: select(live, acc.value *% 10 +% magnitude, acc.value),
+            ok: acc.ok && select(live, digit, true)
+        };
+    }
+    return acc;
+}
+
+// Entity words are capitalized ASCII or carry high bytes (UTF-8
+// pass-through: the host validates UTF-8 before MNCS ever sees the span,
+// because scalar UTF-8 semantics do not exist in the language).
+fn is_entity_word(text: [byte; up_to 64], start: u64, length: u64) -> (result: bool) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    if tlen == 0 || tlen > 16 {
+        return false;
+    }
+    let first: byte = span_byte(text, start, length, 0);
+    if bool_not(is_upper(first) || (first as i64) >= 128) {
+        return false;
+    }
+    iterate i over text carrying tail: bool = true {
+        let live: bool = i < tlen && i > 0;
+        let current: byte = span_byte(text, start, length, i);
+        let keep: bool = is_alpha(current) || (current as i64) >= 128;
+        next tail = tail && select(live, keep, true);
+    }
+    return tail;
+}
+
+// Lowercase ASCII alphabetic spans that matched nothing else: unknown
+// object candidates whose spelling the host must preserve explicitly.
+fn is_candidate_word(text: [byte; up_to 64], start: u64, length: u64) -> (result: bool) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    if tlen == 0 || tlen > 16 {
+        return false;
+    }
+    iterate i over text carrying ok: bool = true {
+        let live: bool = i < tlen;
+        let current: byte = span_byte(text, start, length, i);
+        next ok = ok && select(live, is_lower(current), true);
+    }
+    return ok;
+}
+
+// Total word classification. Keyword checks come before the entity check
+// so a capitalized verb ("Gave") still reads as a verb; entity case is
+// exact because entity identity is spelling-exact downstream.
+fn classify_word(text: [byte; up_to 64], start: u64, length: u64) -> (result: i64) {
+    if is_give_verb(text, start, length) {
+        return class_verb_active();
+    }
+    if is_receive_verb(text, start, length) {
+        return class_verb_passive();
+    }
+    if is_from_word(text, start, length) {
+        return class_from();
+    }
+    let digits: NumParse = classify_word_number(text, start, length);
+    if digits.ok {
+        return class_number();
+    }
+    if classify_object(text, start, length) != object_unknown() {
+        return class_object();
+    }
+    if is_entity_word(text, start, length) {
+        return class_entity();
+    }
+    if is_candidate_word(text, start, length) {
+        return class_candidate();
+    }
+    return class_other();
+}

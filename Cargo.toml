@@ -1,0 +1,23 @@
+[package]
+name = "mncs-ingest"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Machine-native ingestion and semantic-normalization boundary for MNCS"
+repository = "https://github.com/epi13/mncs-ingest"
+
+[dependencies]
+# Pinned to the mncs-language commit this slice was built and tested against.
+# The pin is load-bearing: semantic policy is executed through these crates,
+# so the compiler revision is part of the ingest contract. See README.md.
+mncs-compiler = { git = "https://github.com/epi13/mncs-language.git", rev = "d7cc9536f0507fc34086d8a5784c6177ce5b67b4" }
+mncs-codegen = { git = "https://github.com/epi13/mncs-language.git", rev = "d7cc9536f0507fc34086d8a5784c6177ce5b67b4" }
+mncs-model = { git = "https://github.com/epi13/mncs-language.git", rev = "d7cc9536f0507fc34086d8a5784c6177ce5b67b4" }
+mncs-syntax = { git = "https://github.com/epi13/mncs-language.git", rev = "d7cc9536f0507fc34086d8a5784c6177ce5b67b4" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

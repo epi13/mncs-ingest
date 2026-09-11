@@ -1,0 +1,429 @@
+mncs 0.13;
+
+// mncs.ingest.parse — bounded transfer-sentence parser.
+//
+// Supported grammar (the complete contract; anything else is a
+// controlled status, never silent reinterpretation):
+//
+//   active:  Entity VERB Entity (Number)? Object
+//   passive: Entity RECEIVE-VERB (Number)? Object FROM Entity
+//
+// where VERB is gave/give/gives, RECEIVE-VERB is
+// received/receive/receives, Number is zero..ten or 0..999, Object is a
+// known or unknown lowercase word, Entity is a capitalized word, and the
+// sentence ends with a single trailing period. At most 8 words, at most
+// 64 bytes. No articles, no adverbs, no punctuation beyond the final
+// period.
+//
+// Statuses: 0 ok, 1 unsupported verb, 2 missing field, 3 malformed
+// quantity, 4 bad shape, 5 empty input.
+module mncs.ingest.parse;
+
+use mncs.ingest.vocab as vocab;
+
+record TransferParse {
+    status: i64,
+    verb: i64,
+    verb_start: i64,
+    verb_length: i64,
+    source_start: i64,
+    source_length: i64,
+    target_start: i64,
+    target_length: i64,
+    object_code: i64,
+    object_start: i64,
+    object_length: i64,
+    quantity: i64,
+    quantity_present: bool,
+    quantity_start: i64,
+    quantity_length: i64
+}
+
+record SplitState {
+    starts: [u64; 8],
+    lens: [u64; 8],
+    count: u64,
+    cur: u64,
+    open: bool,
+    overflow: bool
+}
+
+record ClassState {
+    classes: [i64; 8],
+    verb_idx: i64,
+    verb_count: u64,
+    verb_code: i64,
+    from_idx: i64,
+    from_count: u64
+}
+
+record AssignState {
+    status: i64,
+    verb: i64,
+    source_idx: i64,
+    target_idx: i64,
+    object_idx: i64,
+    object_code: i64,
+    quantity_idx: i64,
+    quantity: i64,
+    quantity_present: bool,
+    entity_total: u64,
+    object_total: u64,
+    quantity_total: u64,
+    numeric_bad: bool
+}
+
+// Classify every live word span once. Verb and from markers record their
+// first index plus occurrence counts; duplicates fail closed downstream.
+fn classify_all(text: [byte; up_to 64], split: SplitState) -> (result: ClassState) {
+    let seed: ClassState = ClassState {
+        classes: zero8i(),
+        verb_idx: 0 - 1,
+        verb_count: 0,
+        verb_code: 0,
+        from_idx: 0 - 1,
+        from_count: 0
+    };
+    let starts: [u64; 8] = split.starts;
+    let lens: [u64; 8] = split.lens;
+    let count: u64 = split.count;
+    iterate j over starts carrying st: ClassState = seed {
+        let live: bool = j < count;
+        let slot: u64 = select(live, j, 0);
+        let class: i64 = vocab.classify_word(text, starts[slot], lens[slot]);
+        let is_verb: bool = live && (class == vocab.class_verb_active() || class == vocab.class_verb_passive());
+        let is_from: bool = live && class == vocab.class_from();
+        let first_verb: bool = is_verb && st.verb_count == 0;
+        let first_from: bool = is_from && st.from_count == 0;
+        let keep_class: i64 = st.classes[slot];
+        next st = ClassState {
+            classes: replace(st.classes, slot, select(live, class, keep_class)),
+            verb_idx: select(first_verb, j as i64, st.verb_idx),
+            verb_count: st.verb_count +% select(is_verb, 1, 0),
+            verb_code: select(first_verb && class == vocab.class_verb_active(), vocab.verb_active(),
+                select(first_verb, vocab.verb_passive(), st.verb_code)),
+            from_idx: select(first_from, j as i64, st.from_idx),
+            from_count: st.from_count +% select(is_from, 1, 0)
+        };
+    }
+    return st;
+}
+
+fn seed_assign(verb_code: i64) -> (result: AssignState) {
+    return AssignState {
+        status: status_ok(),
+        verb: verb_code,
+        source_idx: 0 - 1,
+        target_idx: 0 - 1,
+        object_idx: 0 - 1,
+        object_code: 0,
+        quantity_idx: 0 - 1,
+        quantity: 0,
+        quantity_present: false,
+        entity_total: 0,
+        object_total: 0,
+        quantity_total: 0,
+        numeric_bad: false
+    };
+}
+
+// Role assignment over classified spans. The first error wins: every stage
+// only writes while status is still ok, giving a deterministic precedence
+// of unsupported-verb, missing-field, malformed-quantity, then bad-shape.
+fn assign_roles(text: [byte; up_to 64], split: SplitState, cls: ClassState) -> (result: AssignState) {
+    let starts: [u64; 8] = split.starts;
+    let lens: [u64; 8] = split.lens;
+    let count: u64 = split.count;
+    let classes: [i64; 8] = cls.classes;
+    iterate j over starts carrying st: AssignState = seed_assign(cls.verb_code) {
+        let live: bool = j < count;
+        let slot: u64 = select(live, j, 0);
+        let class: i64 = select(live, classes[slot], 0 - 1);
+        let ws: u64 = starts[slot];
+        let wl: u64 = lens[slot];
+        let ji: i64 = j as i64;
+        let after_verb: bool = ji > cls.verb_idx;
+        let before_verb: bool = ji < cls.verb_idx;
+        let passive: bool = cls.verb_code == vocab.verb_passive();
+        let want_source_side: bool = select(passive, after_verb && ji > cls.from_idx, before_verb);
+        let fresh: bool = st.status == status_ok();
+        let take_source: bool = fresh && live && class == vocab.class_entity() && want_source_side && st.source_idx == 0 - 1;
+        let take_target: bool = fresh && live && class == vocab.class_entity() && vocab.bool_not(want_source_side) && st.target_idx == 0 - 1;
+        let objectish: bool = live && (class == vocab.class_object() || class == vocab.class_candidate());
+        let take_object: bool = fresh && objectish && after_verb && st.object_idx == 0 - 1;
+        let take_quantity: bool = fresh && live && class == vocab.class_number() && after_verb && st.quantity_idx == 0 - 1;
+        let first_byte: byte = vocab.span_byte(text, ws, wl, 0);
+        let looks_numeric: bool = live && vocab.is_digit(first_byte) && class == vocab.class_number();
+        let numeric_spoil: bool = live && vocab.is_digit(first_byte) && vocab.bool_not(looks_numeric) && after_verb;
+        let parsed: vocab.NumParse = vocab.classify_word_number(text, ws, wl);
+        next st = AssignState {
+            status: st.status,
+            verb: st.verb,
+            source_idx: select(take_source, ji, st.source_idx),
+            target_idx: select(take_target, ji, st.target_idx),
+            object_idx: select(take_object, ji, st.object_idx),
+            object_code: select(take_object, vocab.classify_object(text, ws, wl), st.object_code),
+            quantity_idx: select(take_quantity, ji, st.quantity_idx),
+            quantity: select(take_quantity && parsed.ok, parsed.value, st.quantity),
+            quantity_present: st.quantity_present || take_quantity,
+            entity_total: st.entity_total +% select(live && class == vocab.class_entity(), 1, 0),
+            object_total: st.object_total +% select(objectish, 1, 0),
+            quantity_total: st.quantity_total +% select(live && class == vocab.class_number() && after_verb, 1, 0),
+            numeric_bad: st.numeric_bad || numeric_spoil
+        };
+    }
+    return finish_assign(text, split, cls, st);
+}
+
+// Structural checks in deterministic precedence.
+fn finish_assign(text: [byte; up_to 64], split: SplitState, cls: ClassState, st: AssignState) -> (result: AssignState) {
+    let passive: bool = cls.verb_code == vocab.verb_passive();
+    let from_ok: bool = select(passive, cls.from_count == 1, true);
+    let sides_ok: bool = st.source_idx != 0 - 1 && st.target_idx != 0 - 1;
+    let object_ok: bool = st.object_idx != 0 - 1;
+    let counts_ok: bool = st.entity_total == 2 && st.object_total <= 1 && st.quantity_total <= 1;
+    let covered: bool = coverage_ok(split, cls, st, passive);
+    let status: i64 = select(st.status != status_ok(), st.status,
+        select(vocab.bool_not(from_ok) || vocab.bool_not(sides_ok) || vocab.bool_not(object_ok), status_missing_field(),
+        select(st.numeric_bad, status_malformed_quantity(),
+        select(vocab.bool_not(counts_ok) || vocab.bool_not(covered), status_bad_shape(), status_ok()))));
+    return AssignState {
+        status: status,
+        verb: st.verb,
+        source_idx: st.source_idx,
+        target_idx: st.target_idx,
+        object_idx: st.object_idx,
+        object_code: st.object_code,
+        quantity_idx: st.quantity_idx,
+        quantity: st.quantity,
+        quantity_present: st.quantity_present,
+        entity_total: st.entity_total,
+        object_total: st.object_total,
+        quantity_total: st.quantity_total,
+        numeric_bad: st.numeric_bad
+    };
+}
+
+// Every live word must be consumed by exactly its role slot.
+fn coverage_ok(split: SplitState, cls: ClassState, st: AssignState, passive: bool) -> (result: bool) {
+    let count: u64 = split.count;
+    let starts: [u64; 8] = split.starts;
+    iterate j over starts carrying ok: bool = true {
+        let live: bool = j < count;
+        let ji: i64 = j as i64;
+        let consumed: bool = ji == cls.verb_idx || ji == st.source_idx || ji == st.target_idx
+            || ji == st.object_idx || ji == st.quantity_idx
+            || (passive && ji == cls.from_idx);
+        next ok = ok && select(live, consumed, true);
+    }
+    return ok;
+}
+
+fn status_ok() -> (result: i64) {
+    return 0;
+}
+
+fn status_unsupported_verb() -> (result: i64) {
+    return 1;
+}
+
+fn status_missing_field() -> (result: i64) {
+    return 2;
+}
+
+fn status_malformed_quantity() -> (result: i64) {
+    return 3;
+}
+
+fn status_bad_shape() -> (result: i64) {
+    return 4;
+}
+
+fn status_empty() -> (result: i64) {
+    return 5;
+}
+
+fn zero8() -> (result: [u64; 8]) {
+    return [(0) as u64, (0) as u64, (0) as u64, (0) as u64, (0) as u64, (0) as u64, (0) as u64, (0) as u64];
+}
+
+fn zero8i() -> (result: [i64; 8]) {
+    return [(0 - 1) as i64, (0 - 1) as i64, (0 - 1) as i64, (0 - 1) as i64, (0 - 1) as i64, (0 - 1) as i64, (0 - 1) as i64, (0 - 1) as i64];
+}
+
+// Effective length: strip trailing spaces, then one trailing period.
+// The period is required sentence punctuation, not a word character.
+// One character leaves per fold step; the fold runs over storage, which
+// always covers the at most `tlen` strips that can apply. At most one
+// period strips, so a doubled period stays visible to word splitting and
+// fails as bad shape instead of being silently forgiven.
+record LenState {
+    len: u64,
+    period: bool
+}
+
+// Word splitter: records byte spans of at most 8 whitespace-separated
+// words. Runs over storage with an explicit live guard, then a finalizer
+// closes a word left open at the end, so the result is correct whether
+// iteration covers storage or only the runtime length.
+fn split_words(text: [byte; up_to 64], length: u64) -> (result: SplitState) {
+    let seed: SplitState = SplitState {
+        starts: zero8(),
+        lens: zero8(),
+        count: 0,
+        cur: 0,
+        open: false,
+        overflow: false
+    };
+    iterate i over text carrying st: SplitState = seed {
+        let live: bool = i < length;
+        let slot: u64 = select(i < text.len, i, 0);
+        let current: byte = select(live && slot < text.len, text[slot], (32) as byte);
+        let space: bool = vocab.bool_not(live) || current == (32) as byte;
+        let opens: bool = live && vocab.bool_not(space) && vocab.bool_not(st.open);
+        let stays_open: bool = live && vocab.bool_not(space) && st.open;
+        let closes: bool = space && st.open;
+        let full: bool = st.count >= 8;
+        let slot_open: u64 = select(st.count < 8, st.count, 0);
+        let keep_start: u64 = st.starts[slot_open];
+        let keep_len: u64 = st.lens[slot_open];
+        next st = SplitState {
+            starts: replace(st.starts, slot_open, select(opens && vocab.bool_not(full), i, keep_start)),
+            lens: replace(st.lens, slot_open, select(closes, i -% st.cur, keep_len)),
+            count: select(closes, st.count +% 1, select(opens && vocab.bool_not(full), st.count, st.count)),
+            cur: select(opens, i, st.cur),
+            open: opens || stays_open,
+            overflow: st.overflow || (opens && full)
+        };
+    }
+    return close_split(st, length);
+}
+
+// Finalizer: close a word still open at the effective end.
+fn close_split(st: SplitState, length: u64) -> (result: SplitState) {
+    let slot: u64 = select(st.count < 8, st.count, 0);
+    let keep_len: u64 = st.lens[slot];
+    return SplitState {
+        starts: st.starts,
+        lens: replace(st.lens, slot, select(st.open && st.count < 8, length -% st.cur, keep_len)),
+        count: select(st.open && st.count < 8, st.count +% 1, st.count),
+        cur: st.cur,
+        open: false,
+        overflow: st.overflow || (st.open && st.count >= 8)
+    };
+}
+
+fn effective_length(text: [byte; up_to 64], length: u64) -> (result: u64) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    let seed: LenState = LenState { len: tlen, period: false };
+    iterate i over text carrying st: LenState = seed {
+        let live: bool = st.len > 0;
+        let slot: u64 = select(live, st.len -% 1, 0);
+        let current: byte = select(live && slot < text.len, text[slot], (32) as byte);
+        let is_space: bool = current == (32) as byte;
+        let strip_space: bool = live && is_space;
+        let strip_period: bool = live && current == (46) as byte && vocab.bool_not(st.period);
+        let keep: bool = vocab.bool_not(strip_space || strip_period);
+        next st = LenState {
+            len: select(keep, st.len, st.len -% 1),
+            period: st.period || strip_period
+        };
+    }
+    return st.len;
+}
+
+// Terminal constructors: every failure mode builds a full parse record so
+// the host always receives spans and codes, never a bare trap.
+fn empty_parse() -> (result: TransferParse) {
+    return TransferParse {
+        status: status_empty(),
+        verb: 0,
+        verb_start: 0 - 1,
+        verb_length: 0 - 1,
+        source_start: 0 - 1,
+        source_length: 0 - 1,
+        target_start: 0 - 1,
+        target_length: 0 - 1,
+        object_code: 0,
+        object_start: 0 - 1,
+        object_length: 0 - 1,
+        quantity: 0,
+        quantity_present: false,
+        quantity_start: 0 - 1,
+        quantity_length: 0 - 1
+    };
+}
+
+fn fail_parse(code: i64) -> (result: TransferParse) {
+    return TransferParse {
+        status: code,
+        verb: 0,
+        verb_start: 0 - 1,
+        verb_length: 0 - 1,
+        source_start: 0 - 1,
+        source_length: 0 - 1,
+        target_start: 0 - 1,
+        target_length: 0 - 1,
+        object_code: 0,
+        object_start: 0 - 1,
+        object_length: 0 - 1,
+        quantity: 0,
+        quantity_present: false,
+        quantity_start: 0 - 1,
+        quantity_length: 0 - 1
+    };
+}
+
+fn span_start(split: SplitState, idx: i64) -> (result: i64) {
+    let slot: u64 = select(idx == 0 - 1, 0, idx as u64);
+    return select(idx == 0 - 1, 0 - 1, split.starts[select(slot < 8, slot, 0)] as i64);
+}
+
+fn span_length(split: SplitState, idx: i64) -> (result: i64) {
+    let slot: u64 = select(idx == 0 - 1, 0, idx as u64);
+    return select(idx == 0 - 1, 0 - 1, split.lens[select(slot < 8, slot, 0)] as i64);
+}
+
+// The text-adapter entry point: bytes in, canonical role spans out.
+// Entity spellings stay byte spans into the caller's buffer; the host
+// slices them for the fragment and provenance, so no string type is
+// needed to preserve source identity.
+fn parse_transfer(text: [byte; up_to 64], length: u64) -> (result: TransferParse) {
+    let tlen: u64 = select(length <= text.len, length, text.len);
+    if tlen == 0 {
+        return empty_parse();
+    }
+    let eff: u64 = effective_length(text, tlen);
+    if eff == 0 {
+        return empty_parse();
+    }
+    let split: SplitState = split_words(text, eff);
+    if split.overflow || split.count == 0 {
+        return fail_parse(status_bad_shape());
+    }
+    let cls: ClassState = classify_all(text, split);
+    if cls.verb_count == 0 {
+        return fail_parse(status_unsupported_verb());
+    }
+    if cls.verb_count > 1 {
+        return fail_parse(status_bad_shape());
+    }
+    let st: AssignState = assign_roles(text, split, cls);
+    return TransferParse {
+        status: st.status,
+        verb: st.verb,
+        verb_start: span_start(split, cls.verb_idx),
+        verb_length: span_length(split, cls.verb_idx),
+        source_start: span_start(split, st.source_idx),
+        source_length: span_length(split, st.source_idx),
+        target_start: span_start(split, st.target_idx),
+        target_length: span_length(split, st.target_idx),
+        object_code: st.object_code,
+        object_start: span_start(split, st.object_idx),
+        object_length: span_length(split, st.object_idx),
+        quantity: st.quantity,
+        quantity_present: st.quantity_present,
+        quantity_start: span_start(split, st.quantity_idx),
+        quantity_length: span_length(split, st.quantity_idx)
+    };
+}
