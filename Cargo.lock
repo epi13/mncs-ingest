@@ -459,7 +459,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "mncs-codegen"
 version = "0.1.0"
-source = "git+https://github.com/epi13/mncs-language.git?rev=d7cc9536f0507fc34086d8a5784c6177ce5b67b4#d7cc9536f0507fc34086d8a5784c6177ce5b67b4"
+source = "git+https://github.com/epi13/mncs-language.git?rev=f7c1ba3dc45b82067d06b34e828a2bed1ec10209#f7c1ba3dc45b82067d06b34e828a2bed1ec10209"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -478,7 +478,7 @@ dependencies = [
 [[package]]
 name = "mncs-compiler"
 version = "0.1.0"
-source = "git+https://github.com/epi13/mncs-language.git?rev=d7cc9536f0507fc34086d8a5784c6177ce5b67b4#d7cc9536f0507fc34086d8a5784c6177ce5b67b4"
+source = "git+https://github.com/epi13/mncs-language.git?rev=f7c1ba3dc45b82067d06b34e828a2bed1ec10209#f7c1ba3dc45b82067d06b34e828a2bed1ec10209"
 dependencies = [
  "mncs-codegen",
  "mncs-model",
@@ -505,7 +505,7 @@ dependencies = [
 [[package]]
 name = "mncs-model"
 version = "0.1.0"
-source = "git+https://github.com/epi13/mncs-language.git?rev=d7cc9536f0507fc34086d8a5784c6177ce5b67b4#d7cc9536f0507fc34086d8a5784c6177ce5b67b4"
+source = "git+https://github.com/epi13/mncs-language.git?rev=f7c1ba3dc45b82067d06b34e828a2bed1ec10209#f7c1ba3dc45b82067d06b34e828a2bed1ec10209"
 dependencies = [
  "ed25519-dalek",
  "serde",
@@ -517,7 +517,7 @@ dependencies = [
 [[package]]
 name = "mncs-syntax"
 version = "0.1.0"
-source = "git+https://github.com/epi13/mncs-language.git?rev=d7cc9536f0507fc34086d8a5784c6177ce5b67b4#d7cc9536f0507fc34086d8a5784c6177ce5b67b4"
+source = "git+https://github.com/epi13/mncs-language.git?rev=f7c1ba3dc45b82067d06b34e828a2bed1ec10209#f7c1ba3dc45b82067d06b34e828a2bed1ec10209"
 dependencies = [
  "serde",
  "serde_json",

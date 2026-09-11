@@ -10,10 +10,10 @@ repository = "https://github.com/epi13/mncs-ingest"
 # Pinned to the mncs-language commit this slice was built and tested against.
 # The pin is load-bearing: semantic policy is executed through these crates,
 # so the compiler revision is part of the ingest contract. See README.md.
-mncs-compiler = { git = "https://github.com/epi13/mncs-language.git", rev = "d7cc9536f0507fc34086d8a5784c6177ce5b67b4" }
-mncs-codegen = { git = "https://github.com/epi13/mncs-language.git", rev = "d7cc9536f0507fc34086d8a5784c6177ce5b67b4" }
-mncs-model = { git = "https://github.com/epi13/mncs-language.git", rev = "d7cc9536f0507fc34086d8a5784c6177ce5b67b4" }
-mncs-syntax = { git = "https://github.com/epi13/mncs-language.git", rev = "d7cc9536f0507fc34086d8a5784c6177ce5b67b4" }
+mncs-compiler = { git = "https://github.com/epi13/mncs-language.git", rev = "f7c1ba3dc45b82067d06b34e828a2bed1ec10209" }
+mncs-codegen = { git = "https://github.com/epi13/mncs-language.git", rev = "f7c1ba3dc45b82067d06b34e828a2bed1ec10209" }
+mncs-model = { git = "https://github.com/epi13/mncs-language.git", rev = "f7c1ba3dc45b82067d06b34e828a2bed1ec10209" }
+mncs-syntax = { git = "https://github.com/epi13/mncs-language.git", rev = "f7c1ba3dc45b82067d06b34e828a2bed1ec10209" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
