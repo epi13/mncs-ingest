@@ -229,21 +229,28 @@ fn seeded_roundtrip_fuzz() {
         let chunk = 1 + next() % 40;
         let parsed = read_all(rt, &encoded, chunk);
         assert_eq!(parsed.len(), 1, "case {case}: one record");
-        let expect: Vec<Vec<u8>> = record
-            .iter()
-            .map(|field| {
-                let mut out = Vec::new();
-                let mut bytes = field.iter();
-                while let Some(byte) = bytes.next() {
-                    if *byte == b'\\' {
-                        out.push(*bytes.next().unwrap());
-                    } else {
-                        out.push(*byte);
+        // A single empty field encodes to a lone newline, which reads
+        // back as one zero-field record (pinned by
+        // empty_fields_and_lines_behave), not as one empty field.
+        let expect: Vec<Vec<u8>> = if record.len() == 1 && record[0].is_empty() {
+            Vec::new()
+        } else {
+            record
+                .iter()
+                .map(|field| {
+                    let mut out = Vec::new();
+                    let mut bytes = field.iter();
+                    while let Some(byte) = bytes.next() {
+                        if *byte == b'\\' {
+                            out.push(*bytes.next().unwrap());
+                        } else {
+                            out.push(*byte);
+                        }
                     }
-                }
-                out
-            })
-            .collect();
+                    out
+                })
+                .collect()
+        };
         assert_eq!(parsed[0].fields, expect, "case {case}: roundtrip");
     }
 }
