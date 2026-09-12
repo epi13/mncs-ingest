@@ -1,0 +1,366 @@
+mncs 0.14;
+
+// mncs.flow.nest — incremental structural scanner for a bounded JSON
+// subset (manifests). Text arrives in chunk views; the scanner carries
+// bounded owned state across calls and validates structure progressively:
+// container matching (depth ≤ 4), string/escape discipline, and token
+// sequencing (which token may follow which).
+//
+// Expect states: 0 need-value (after `:`, array post-comma), 1 fresh
+// container (object wants a key or `}`; array wants a value or `]` —
+// the innermost stack entry disambiguates, see `close_string` and
+// `literal_token`), 2 need-colon, 3 need-comma-or-close, 4 complete
+// (exactly one root value closed).
+// Container stack holds closers: 1 object (`}`), 2 array (`]`).
+//
+// Escape discipline: `\"` and `\\` plus `\n` `\t` are legal escapes;
+// `\u` (and any other `\x`) is malformed — unicode escapes need scalar
+// semantics the language does not offer (INGEST-P-003). A raw control
+// byte outside strings is malformed; inside strings only tab survives.
+//
+// Statuses: 0 ok-so-far, 1 complete, 2 truncated (eof mid-value),
+// 3 malformed. `position` is the absolute stream offset of the verdict.
+module mncs.flow.nest;
+
+record NestState {
+    depth: u64,
+    stack: [u64; 4],
+    expect: u64,
+    in_string: bool,
+    esc: bool,
+    max_depth: u64,
+    seen_value: bool,
+    in_literal: bool,
+    after_comma: bool
+}
+
+record ScanOut {
+    status: i64,
+    state: NestState,
+    position: u64,
+    consumed: u64
+}
+
+fn status_ok() -> (result: i64) {
+    return 0;
+}
+
+fn status_complete() -> (result: i64) {
+    return 1;
+}
+
+fn status_truncated() -> (result: i64) {
+    return 2;
+}
+
+fn status_malformed() -> (result: i64) {
+    return 3;
+}
+
+fn max_nest() -> (result: u64) {
+    return 4;
+}
+
+fn seed_state() -> (result: NestState) {
+    return NestState {
+        depth: 0,
+        stack: [(0) as u64, (0) as u64, (0) as u64, (0) as u64],
+        expect: 0,
+        in_string: false,
+        esc: false,
+        max_depth: 0,
+        seen_value: false,
+        in_literal: false,
+        after_comma: false
+    };
+}
+
+fn is_space(value: byte) -> (result: bool) {
+    return value == (32) as byte || value == (9) as byte || value == (10) as byte || value == (13) as byte;
+}
+
+fn is_digit(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n >= 48 && n <= 57;
+}
+
+fn is_control(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n < 32 && n != 9;
+}
+
+// One byte through the state machine. Pure transition: callers fold it
+// over the live window with keep-patterns, so dead lanes change nothing.
+record Step {
+    state: NestState,
+    bad: bool
+}
+
+fn step_byte(st: NestState, current: byte) -> (result: Step) {
+    if st.in_string {
+        return step_string(st, current);
+    }
+    if is_space(current) {
+        return Step { state: st, bad: false };
+    }
+    return step_token(st, current);
+}
+
+fn step_string(st: NestState, current: byte) -> (result: Step) {
+    if st.esc {
+        if current == (34) as byte || current == (92) as byte {
+            return Step { state: NestState { ..st, esc: false }, bad: false };
+        }
+        if current == (110) as byte || current == (116) as byte {
+            return Step { state: NestState { ..st, esc: false }, bad: false };
+        }
+        return Step { state: st, bad: true };
+    }
+    if current == (92) as byte {
+        return Step { state: NestState { ..st, esc: true }, bad: false };
+    }
+    if current == (34) as byte {
+        return close_string(st);
+    }
+    if is_control(current) {
+        return Step { state: st, bad: true };
+    }
+    return Step { state: st, bad: false };
+}
+
+// A closing quote finishes either a key (expect 2 → colon) or a value.
+// `expect == 1` alone cannot tell them apart: a fresh object waits for
+// a key but a fresh array waits for a value, so the innermost stack
+// entry decides. A string element of an array is a value.
+fn innermost_is_array(st: NestState) -> (result: bool) {
+    if st.depth == 0 {
+        return false;
+    }
+    let slot: u64 = select(st.depth -% 1 < 4, st.depth -% 1, 0);
+    return st.stack[slot] == 2;
+}
+
+// Manifests are objects: a string root (depth 0, expect 0) is malformed,
+// not a value — only `{` may open the document.
+fn close_string(st: NestState) -> (result: Step) {
+    if st.expect == 1 && !(innermost_is_array(st)) {
+        return Step { state: NestState { ..st, in_string: false, expect: 2 }, bad: false };
+    }
+    if st.expect == 0 && st.depth == 0 {
+        return Step { state: st, bad: true };
+    }
+    return Step { state: NestState { ..st, in_string: false, expect: 3, seen_value: true }, bad: false };
+}
+
+fn is_literal_char(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    let alpha: bool = (n >= 65 && n <= 90) || (n >= 97 && n <= 122);
+    let punct: bool = n == 46 || n == 43 || n == 45 || n == 95;
+    return alpha || is_digit(value) || punct;
+}
+
+// A started literal continues over literal characters; anything else
+// ends it and reprocesses the byte as a fresh token. Full spelling is
+// the extractor's job — the scanner owns position legality, so
+// `{"a": tru` truncates (more bytes could finish it) while `{"a": tru}`
+// fails later in extraction, not here.
+fn step_token(st: NestState, current: byte) -> (result: Step) {
+    if st.in_literal && is_literal_char(current) {
+        return Step { state: st, bad: false };
+    }
+    let clear: NestState = NestState { ..st, in_literal: false };
+    return step_token_open(clear, current);
+}
+
+fn step_token_open(st: NestState, current: byte) -> (result: Step) {
+    if current == (34) as byte {
+        if st.expect == 0 || st.expect == 1 {
+            return Step { state: NestState { ..st, in_string: true, esc: false, after_comma: false }, bad: false };
+        }
+        return Step { state: st, bad: true };
+    }
+    if current == (123) as byte {
+        return open_container(st, 1);
+    }
+    if current == (91) as byte {
+        return open_container(st, 2);
+    }
+    if current == (125) as byte {
+        return close_container(st, 1);
+    }
+    if current == (93) as byte {
+        return close_container(st, 2);
+    }
+    if current == (58) as byte {
+        if st.expect == 2 {
+            return Step { state: NestState { ..st, expect: 0, after_comma: false }, bad: false };
+        }
+        return Step { state: st, bad: true };
+    }
+    if current == (44) as byte {
+        if st.expect == 3 {
+            return Step { state: after_comma(st), bad: false };
+        }
+        return Step { state: st, bad: true };
+    }
+    if current == (116) as byte {
+        return literal_token(st);
+    }
+    if current == (102) as byte {
+        return literal_token(st);
+    }
+    if current == (45) as byte || is_digit(current) {
+        return literal_token(st);
+    }
+    return Step { state: st, bad: true };
+}
+
+// `{`/`[` open where a value (or, at depth 0, the root) may start.
+// A container never follows a comma directly: `{"a":1,{"b":2}}` has no
+// key, and expect==1 alone cannot see the missing one.
+fn open_container(st: NestState, closer: u64) -> (result: Step) {
+    if st.expect != 0 && st.expect != 1 {
+        return Step { state: st, bad: true };
+    }
+    if st.expect == 1 && st.after_comma {
+        return Step { state: st, bad: true };
+    }
+    if st.depth >= max_nest() {
+        return Step { state: st, bad: true };
+    }
+    let slot: u64 = select(st.depth < 4, st.depth, 0);
+    let keep: u64 = st.stack[slot];
+    return Step {
+        state: NestState {
+            ..st,
+            depth: st.depth +% 1,
+            stack: replace(st.stack, slot, select(st.depth < 4, closer, keep)),
+            expect: 1,
+            max_depth: select(st.depth +% 1 > st.max_depth, st.depth +% 1, st.max_depth),
+            seen_value: true
+        },
+        bad: false
+    };
+}
+
+// `}`/`]` close the matching container; closing the last one completes
+// the root value. A close never opens a new expectation inside.
+fn close_container(st: NestState, closer: u64) -> (result: Step) {
+    if st.depth == 0 {
+        return Step { state: st, bad: true };
+    }
+    let slot: u64 = select(st.depth -% 1 < 4, st.depth -% 1, 0);
+    if st.stack[slot] != closer {
+        return Step { state: st, bad: true };
+    }
+    if st.expect == 0 || st.expect == 2 || st.expect == 4 {
+        return Step { state: st, bad: true };
+    }
+    // `{}` and `[]` close fresh; `{"a":1,}` does not: after_comma pins
+    // the trailing comma that expect==1 alone cannot see.
+    if st.expect == 1 && st.after_comma {
+        return Step { state: st, bad: true };
+    }
+    let last: bool = st.depth == 1;
+    return Step {
+        state: NestState {
+            ..st,
+            depth: st.depth -% 1,
+            expect: select(last, 4, 3),
+            seen_value: true,
+            after_comma: false
+        },
+        bad: false
+    };
+}
+
+// After a comma: an object wants a key, an array wants a value.
+fn after_comma(st: NestState) -> (result: NestState) {
+    if st.depth == 0 {
+        return NestState { ..st, after_comma: true };
+    }
+    let slot: u64 = select(st.depth -% 1 < 4, st.depth -% 1, 0);
+    let closer: u64 = st.stack[slot];
+    return NestState { ..st, expect: select(closer == 1, 1, 0), after_comma: true };
+}
+
+// Literals (`true`, `false`, numbers) are single-byte classified here;
+// full spelling is validated by the extractor over staged bytes. What
+// the scanner owns is POSITION legality: a literal byte may only start
+// where a value may start.
+fn literal_token(st: NestState) -> (result: Step) {
+    // A literal may start where a value may start: expect 0, or a fresh
+    // array (expect 1 with an array innermost — the same overload that
+    // `close_string` disambiguates). A fresh object at expect 1 wants a
+    // key, so literals stay illegal there.
+    let fresh_array: bool = st.expect == 1 && innermost_is_array(st);
+    if (st.expect == 0 && st.depth > 0) || fresh_array {
+        return Step {
+            state: NestState { ..st, expect: 3, seen_value: true, in_literal: true, after_comma: false },
+            bad: false
+        };
+    }
+    return Step { state: st, bad: true };
+}
+
+// Feed one chunk view. Absolute `base` offsets every reported position.
+fn scan_chunk(state: NestState, view: [byte; up_to 256], view_len: u64, base: u64, eof: bool) -> (result: ScanOut) {
+    let vlen: u64 = select(view_len <= view.len, view_len, view.len);
+    iterate i over view carrying acc: ScanAcc = ScanAcc { state: state, bad: false, at: 0 } {
+        let live: bool = i < vlen;
+        let slot: u64 = select(i < view.len, i, 0);
+        let current: byte = select(live && slot < view.len, view[slot], (32) as byte);
+        let moved: Step = step_byte(acc.state, current);
+        // `at` pins the FIRST offending index so malformed positions are
+        // exact, not past-the-end.
+        let struck: bool = live && moved.bad && !(acc.bad);
+        next acc = ScanAcc {
+            state: select(live && !(acc.bad), moved.state, acc.state),
+            bad: acc.bad || (live && moved.bad),
+            at: select(struck, i, acc.at)
+        };
+    }
+    return finish_scan(acc, vlen, base, eof);
+}
+
+record ScanAcc {
+    state: NestState,
+    bad: bool,
+    at: u64
+}
+
+// Finalize: malformed positions point at the offending byte; eof with an
+// open value is truncated; a closed root with trailing bytes is
+// malformed (exactly one root value per document).
+fn finish_scan(acc: ScanAcc, vlen: u64, base: u64, eof: bool) -> (result: ScanOut) {
+    if acc.bad {
+        return ScanOut {
+            status: status_malformed(),
+            state: acc.state,
+            position: base +% acc.at,
+            consumed: vlen
+        };
+    }
+    if eof {
+        if acc.state.expect == 4 && acc.state.depth == 0 {
+            return ScanOut {
+                status: status_complete(),
+                state: acc.state,
+                position: base +% vlen,
+                consumed: vlen
+            };
+        }
+        return ScanOut {
+            status: status_truncated(),
+            state: acc.state,
+            position: base +% vlen,
+            consumed: vlen
+        };
+    }
+    return ScanOut {
+        status: status_ok(),
+        state: acc.state,
+        position: base +% vlen,
+        consumed: vlen
+    };
+}

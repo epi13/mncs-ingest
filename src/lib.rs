@@ -8,7 +8,11 @@
 pub mod adapters;
 pub mod canonical;
 pub mod consumer;
+pub mod csv;
+pub mod embed;
+pub mod manifest;
 pub mod error;
+pub mod frames;
 pub mod ir;
 pub mod language;
 

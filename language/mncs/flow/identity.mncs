@@ -1,0 +1,44 @@
+mncs 0.14;
+
+// mncs.flow.identity — normalized-content digests in pure MNCS.
+//
+// A record's canonical bytes hash to the same digest however the source
+// was chunked: only the byte sequence participates in meaning (the
+// vendored sha256 module proves chunk-convergence by construction).
+// The host supplies the SHA-256 round table (stdlib keeps constants
+// host-side — noted in INGEST-P-011); the record crosses once and all
+// blocking/update/finalize steps stay inside, so digest state never
+// crosses the boundary (INGEST-P-009 workaround by design).
+module mncs.flow.identity;
+
+use mncs.std.sha256.v1 as sha;
+
+fn zero64b() -> (result: [byte; 64]) {
+    return [0; 64];
+}
+
+// One-shot digest of up to 256 canonical bytes: stage 64-byte pieces
+// and stream them through update/finalize internally.
+fn digest_record(k: [u32; 64], rec: [byte; up_to 256], len: u64) -> (result: [byte; 32]) {
+    let total: u64 = select(len <= rec.len, len, rec.len);
+    // Saturating remainings: every offset/length below is in-range by
+    // construction, including the empty pieces (offset clamped to 0
+    // with length 0, which copy_span accepts as a no-op window).
+    let n0: u64 = select(total <= 64, total, 64);
+    let r1: u64 = select(total > 64, total -% 64, 0);
+    let n1: u64 = select(r1 <= 64, r1, 64);
+    let r2: u64 = select(r1 > 64, r1 -% 64, 0);
+    let n2: u64 = select(r2 <= 64, r2, 64);
+    let r3: u64 = select(r2 > 64, r2 -% 64, 0);
+    let n3: u64 = select(r3 <= 64, r3, 64);
+    let st0: sha.DigestState = sha.init();
+    let p0: [byte; 64] = copy_span(zero64b(), 0, rec, 0, n0);
+    let st1: sha.DigestState = sha.update(st0, p0[0..n0], n0, k);
+    let p1: [byte; 64] = copy_span(zero64b(), 0, rec, select(total > 64, 64, 0), n1);
+    let st2: sha.DigestState = sha.update(st1, p1[0..n1], n1, k);
+    let p2: [byte; 64] = copy_span(zero64b(), 0, rec, select(total > 128, 128, 0), n2);
+    let st3: sha.DigestState = sha.update(st2, p2[0..n2], n2, k);
+    let p3: [byte; 64] = copy_span(zero64b(), 0, rec, select(total > 192, 192, 0), n3);
+    let st4: sha.DigestState = sha.update(st3, p3[0..n3], n3, k);
+    return sha.finalize(st4, k);
+}

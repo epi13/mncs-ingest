@@ -141,6 +141,10 @@ impl LanguageRuntime {
         &self.source_root
     }
 
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
     /// Bounded text path: raw sentence bytes in, canonical role spans out.
     pub fn parse_transfer(&self, text: &[u8]) -> Result<TransferParse, IngestError> {
         let record = self.call_record(
@@ -257,6 +261,187 @@ impl LanguageRuntime {
                 "expected sequence from sort_codes, got {other:?}"
             ))),
         }
+    }
+
+    /// Streaming line step: one chunk view in, at most one line plus carry out.
+    pub fn next_line(
+        &self,
+        carry: &[u8],
+        view: &[u8],
+        eof: bool,
+    ) -> Result<LineOut, IngestError> {
+        let record = self.call_record(
+            "ingest_next_line",
+            vec![
+                bytes256(carry),
+                u64_value(carry.len() as u64),
+                bytes_value(view),
+                u64_value(view.len() as u64),
+                bool_value(eof),
+            ],
+        )?;
+        read_line_out(&record)
+    }
+
+    /// Streaming field step: unescape one field starting at `start`.
+    pub fn field_at(&self, line: &[u8], start: u64) -> Result<FieldOut, IngestError> {
+        let record = self.call_record(
+            "ingest_field_at",
+            vec![
+                bytes256(line),
+                u64_value(line.len() as u64),
+                u64_value(start),
+            ],
+        )?;
+        read_field_out(&record)
+    }
+
+    /// Streaming binary-frame step: stage carry plus one chunk view.
+    pub fn decode_frame(
+        &self,
+        carry: &[u8],
+        view: &[u8],
+        eof: bool,
+    ) -> Result<FrameOut, IngestError> {
+        let record = self.call_record(
+            "ingest_decode_frame",
+            vec![
+                bytes136(carry),
+                u64_value(carry.len() as u64),
+                bytes_value(view),
+                u64_value(view.len() as u64),
+                bool_value(eof),
+            ],
+        )?;
+        let payload_len = field_u64(&record, "payload_len")? as usize;
+        let carry_len = field_u64(&record, "carry_len")? as usize;
+        Ok(FrameOut {
+            status: field_i64(&record, "status")?,
+            version: field_u64(&record, "version")?,
+            kind: field_u64(&record, "kind")?,
+            payload: take_bytes(&record, "payload", payload_len)?,
+            payload_len,
+            frame_len: field_u64(&record, "frame_len")? as usize,
+            carry: take_bytes(&record, "carry", carry_len)?,
+            carry_len,
+            consumed: field_u64(&record, "consumed")? as usize,
+        })
+    }
+
+    /// Incremental manifest scan step with decomposed scanner state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn scan_chunk(
+        &self,
+        state: &crate::manifest::NestState,
+        view: &[u8],
+        base: u64,
+        eof: bool,
+    ) -> Result<crate::manifest::ScanVerdict, IngestError> {
+        let record = self.call_record(
+            "ingest_scan_chunk",
+            vec![
+                u64_value(state.depth),
+                u64_seq(&state.stack),
+                u64_value(state.expect),
+                bool_value(state.in_string),
+                bool_value(state.esc),
+                u64_value(state.max_depth),
+                bool_value(state.seen_value),
+                bool_value(state.in_literal),
+                bool_value(state.after_comma),
+                bytes_value(view),
+                u64_value(view.len() as u64),
+                u64_value(base),
+                bool_value(eof),
+            ],
+        )?;
+        let returned = field_record(&record, "state")?;
+        let stack = field_u64_seq(&returned, "stack")?;
+        let stack: [u64; 4] = stack.try_into().map_err(|_| {
+            IngestError::Language("scanner stack is not 4 lanes".to_owned())
+        })?;
+        Ok(crate::manifest::ScanVerdict {
+            status: field_i64(&record, "status")?,
+            state: crate::manifest::NestState {
+                depth: field_u64(&returned, "depth")?,
+                stack,
+                expect: field_u64(&returned, "expect")?,
+                in_string: field_bool(&returned, "in_string")?,
+                esc: field_bool(&returned, "esc")?,
+                max_depth: field_u64(&returned, "max_depth")?,
+                seen_value: field_bool(&returned, "seen_value")?,
+                in_literal: field_bool(&returned, "in_literal")?,
+                after_comma: field_bool(&returned, "after_comma")?,
+            },
+            position: field_u64(&record, "position")?,
+            consumed: field_u64(&record, "consumed")?,
+        })
+    }
+
+    pub fn pair_count(&self, doc: &[u8]) -> Result<i64, IngestError> {
+        self.call_i64(
+            "ingest_pair_count",
+            vec![bytes512(doc), u64_value(doc.len() as u64)],
+        )
+    }
+
+    pub fn pair_at(
+        &self,
+        doc: &[u8],
+        index: u64,
+    ) -> Result<crate::manifest::ManifestPair, IngestError> {
+        let record = self.call_record(
+            "ingest_pair_at",
+            vec![
+                bytes512(doc),
+                u64_value(doc.len() as u64),
+                u64_value(index),
+            ],
+        )?;
+        let status = field_i64(&record, "status")?;
+        if status == 1 {
+            return Err(IngestError::Language("pair past end".to_owned()));
+        }
+        if status == 3 {
+            return Err(IngestError::Overlong {
+                adapter: "manifest".to_owned(),
+                detail: format!("pair {index}: oversize key or string value"),
+            });
+        }
+        if status != 0 {
+            return Err(IngestError::malformed(
+                "manifest",
+                format!("pair {index}: malformed"),
+            ));
+        }
+        let key_len = field_u64(&record, "key_len")? as usize;
+        let kind = field_i64(&record, "kind")?;
+        let vstart = field_u64(&record, "vstart")?;
+        let vlen = field_u64(&record, "vlen")?;
+        let value = match kind {
+            1 => {
+                let sval_len = field_u64(&record, "sval_len")? as usize;
+                crate::manifest::ManifestValue::Str(take_bytes(&record, "sval", sval_len)?)
+            }
+            2 => crate::manifest::ManifestValue::Int(field_i64(&record, "ival")?),
+            3 => crate::manifest::ManifestValue::Bool(field_bool(&record, "bval")?),
+            4 => crate::manifest::ManifestValue::Nested {
+                start: vstart,
+                len: vlen,
+            },
+            other => {
+                return Err(IngestError::Language(format!(
+                    "unknown value kind {other}"
+                )));
+            }
+        };
+        let kstart = field_u64(&record, "kstart")?;
+        Ok(crate::manifest::ManifestPair {
+            key: take_bytes(&record, "key", key_len)?,
+            key_span: (kstart, key_len as u64),
+            value,
+            value_span: (vstart, vlen),
+        })
     }
 
     /// Diagnostics probe: `[count, verb_idx, verb_count, c0..c4]`.
@@ -409,6 +594,41 @@ impl LanguageRuntime {
     }
 }
 
+/// Streaming line verdict mirroring `mncs.flow.lines.LineOut`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineOut {
+    pub status: i64,
+    pub line: Vec<u8>,
+    pub line_len: usize,
+    pub carry: Vec<u8>,
+    pub carry_len: usize,
+    pub consumed: usize,
+}
+
+/// Streaming binary-frame verdict mirroring `mncs.flow.frames.FrameOut`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameOut {
+    pub status: i64,
+    pub version: u64,
+    pub kind: u64,
+    pub payload: Vec<u8>,
+    pub payload_len: usize,
+    pub frame_len: usize,
+    pub carry: Vec<u8>,
+    pub carry_len: usize,
+    pub consumed: usize,
+}
+
+/// Streaming field verdict mirroring `mncs.flow.fields.FieldOut`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldOut {
+    pub status: i64,
+    pub value: Vec<u8>,
+    pub value_len: usize,
+    pub next_start: u64,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendObservation {
     pub backend: String,
@@ -423,6 +643,154 @@ fn field_i64(record: &[(String, ExecutionValue)], name: &str) -> Result<i64, Ing
             .map_err(|_| IngestError::Language(format!("field {name} out of range"))),
         other => Err(IngestError::Language(format!(
             "field {name} is not an integer: {other:?}"
+        ))),
+    }
+}
+
+pub(crate) fn bytes256_for(bytes: &[u8]) -> ExecutionValue {
+    bytes256(bytes)
+}
+
+pub(crate) fn bytes_for(bytes: &[u8]) -> ExecutionValue {
+    bytes_value(bytes)
+}
+
+pub(crate) fn u64_for(value: u64) -> ExecutionValue {
+    u64_value(value)
+}
+
+pub(crate) fn bool_for(value: bool) -> ExecutionValue {
+    bool_value(value)
+}
+
+pub(crate) fn record_fields(
+    values: &[ExecutionValue],
+    function: &str,
+) -> Result<Vec<(String, ExecutionValue)>, IngestError> {
+    match values.first() {
+        Some(ExecutionValue::Record { fields, .. }) => Ok(fields.to_vec()),
+        other => Err(IngestError::Language(format!(
+            "expected record from {function}, got {other:?}"
+        ))),
+    }
+}
+
+pub(crate) fn read_line_out(
+    record: &[(String, ExecutionValue)],
+) -> Result<LineOut, IngestError> {
+    let line_len = field_u64(record, "line_len")? as usize;
+    let carry_len = field_u64(record, "carry_len")? as usize;
+    Ok(LineOut {
+        status: field_i64(record, "status")?,
+        line: take_bytes(record, "line", line_len)?,
+        line_len,
+        carry: take_bytes(record, "carry", carry_len)?,
+        carry_len,
+        consumed: field_u64(record, "consumed")? as usize,
+    })
+}
+
+pub(crate) fn read_field_out(
+    record: &[(String, ExecutionValue)],
+) -> Result<FieldOut, IngestError> {
+    let value_len = field_u64(record, "value_len")? as usize;
+    Ok(FieldOut {
+        status: field_i64(record, "status")?,
+        value: take_bytes(record, "value", value_len)?,
+        value_len,
+        next_start: field_u64(record, "next_start")?,
+        has_more: field_bool(record, "has_more")?,
+    })
+}
+
+fn field_record(
+    record: &[(String, ExecutionValue)],
+    name: &str,
+) -> Result<Vec<(String, ExecutionValue)>, IngestError> {
+    match record.iter().find(|(key, _)| key == name) {
+        Some((_, ExecutionValue::Record { fields, .. })) => Ok(fields.to_vec()),
+        other => Err(IngestError::Language(format!(
+            "field {name} is not a record: {other:?}"
+        ))),
+    }
+}
+
+fn u64_seq(values: &[u64]) -> ExecutionValue {
+    ExecutionValue::Sequence {
+        values: std::sync::Arc::new(
+            values
+                .iter()
+                .map(|value| ExecutionValue::Integer {
+                    value: i128::from(*value),
+                    ty: mncs_model::IntegerType {
+                        bits: 64,
+                        signed: false,
+                    },
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn field_u64_seq(
+    record: &[(String, ExecutionValue)],
+    name: &str,
+) -> Result<Vec<u64>, IngestError> {
+    match record.iter().find(|(key, _)| key == name) {
+        Some((_, ExecutionValue::Sequence { values })) => values
+            .iter()
+            .map(|value| match value {
+                ExecutionValue::Integer { value, .. } => u64::try_from(*value)
+                    .map_err(|_| IngestError::Language(format!("field {name} out of range"))),
+                other => Err(IngestError::Language(format!(
+                    "field {name} holds a non-integer: {other:?}"
+                ))),
+            })
+            .collect(),
+        other => Err(IngestError::Language(format!(
+            "field {name} is not a sequence: {other:?}"
+        ))),
+    }
+}
+
+fn field_u64(record: &[(String, ExecutionValue)], name: &str) -> Result<u64, IngestError> {
+    match record.iter().find(|(key, _)| key == name) {
+        Some((_, ExecutionValue::Integer { value, .. })) => u64::try_from(*value)
+            .map_err(|_| IngestError::Language(format!("field {name} out of range"))),
+        other => Err(IngestError::Language(format!(
+            "field {name} is not an integer: {other:?}"
+        ))),
+    }
+}
+
+/// First `take` bytes of a fixed-width byte sequence field.
+fn take_bytes(
+    record: &[(String, ExecutionValue)],
+    name: &str,
+    take: usize,
+) -> Result<Vec<u8>, IngestError> {
+    match record.iter().find(|(key, _)| key == name) {
+        Some((_, ExecutionValue::Sequence { values })) => {
+            if take > values.len() {
+                return Err(IngestError::Language(format!(
+                    "field {name} length {take} exceeds storage {}",
+                    values.len()
+                )));
+            }
+            values[..take]
+                .iter()
+                .map(|value| match value {
+                    ExecutionValue::Byte { value } => u8::try_from(*value).map_err(|_| {
+                        IngestError::Language(format!("field {name} holds a non-byte"))
+                    }),
+                    other => Err(IngestError::Language(format!(
+                        "field {name} holds a non-byte: {other:?}"
+                    ))),
+                })
+                .collect()
+        }
+        other => Err(IngestError::Language(format!(
+            "field {name} is not a sequence: {other:?}"
         ))),
     }
 }
@@ -447,6 +815,58 @@ fn field_span(
         return Ok(None);
     }
     Ok(Some((start as u64, length as u64)))
+}
+
+/// Fixed 256-byte staging buffer, zero-padded. The explicit length
+/// travels separately (INGEST-P-009); padding bytes are never read.
+fn bytes256(bytes: &[u8]) -> ExecutionValue {
+    assert!(bytes.len() <= 256, "256-byte staging bound");
+    let mut values: Vec<ExecutionValue> = bytes
+        .iter()
+        .map(|byte| ExecutionValue::Byte {
+            value: i128::from(*byte),
+        })
+        .collect();
+    while values.len() < 256 {
+        values.push(ExecutionValue::Byte { value: 0 });
+    }
+    ExecutionValue::Sequence {
+        values: Arc::new(values),
+    }
+}
+
+/// Fixed 512-byte document staging buffer, zero-padded.
+fn bytes512(bytes: &[u8]) -> ExecutionValue {
+    assert!(bytes.len() <= 512, "512-byte document bound");
+    let mut values: Vec<ExecutionValue> = bytes
+        .iter()
+        .map(|byte| ExecutionValue::Byte {
+            value: i128::from(*byte),
+        })
+        .collect();
+    while values.len() < 512 {
+        values.push(ExecutionValue::Byte { value: 0 });
+    }
+    ExecutionValue::Sequence {
+        values: Arc::new(values),
+    }
+}
+
+/// Fixed 136-byte frame carry buffer, zero-padded.
+fn bytes136(bytes: &[u8]) -> ExecutionValue {
+    assert!(bytes.len() <= 136, "136-byte carry bound");
+    let mut values: Vec<ExecutionValue> = bytes
+        .iter()
+        .map(|byte| ExecutionValue::Byte {
+            value: i128::from(*byte),
+        })
+        .collect();
+    while values.len() < 136 {
+        values.push(ExecutionValue::Byte { value: 0 });
+    }
+    ExecutionValue::Sequence {
+        values: Arc::new(values),
+    }
 }
 
 fn bytes_value(bytes: &[u8]) -> ExecutionValue {
@@ -532,10 +952,28 @@ struct FileModuleResolver {
     root: PathBuf,
 }
 
+impl FileModuleResolver {
+    /// Ingest's own modules win; vendored stdlib (`language/vendor/`,
+    /// see `VENDORING.md`) satisfies `mncs.core.*` / `mncs.std.*`.
+    fn candidate(&self, module: &str) -> Option<(PathBuf, String)> {
+        let relative = format!("{}.mncs", module.replace('.', "/"));
+        let primary = self.root.join(&relative);
+        if let Ok(text) = fs::read_to_string(&primary) {
+            return Some((primary, text));
+        }
+        if module.starts_with("mncs.core.") || module.starts_with("mncs.std.") {
+            let vendored = self.root.join("vendor").join(&relative);
+            if let Ok(text) = fs::read_to_string(&vendored) {
+                return Some((vendored, text));
+            }
+        }
+        None
+    }
+}
+
 impl ModuleResolver for FileModuleResolver {
     fn resolve(&self, module: &str) -> Option<SourceEnvelope> {
-        let path = self.root.join(format!("{}.mncs", module.replace('.', "/")));
-        let text = fs::read_to_string(&path).ok()?;
+        let (path, text) = self.candidate(module)?;
         Some(SourceEnvelope::new(
             SourceArtifactKind::Program,
             path.to_string_lossy().to_string(),

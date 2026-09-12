@@ -1,0 +1,52 @@
+mncs 0.5;
+
+// mncs.core.logic — total boolean algebra helpers.
+//
+// Source profiles do not yet have boolean operators in expressions, so larger
+// programs need helper functions and nested conditionals. This module is the
+// standard-library home of those helpers until native operators land; when
+// operators arrive they must lower to exactly these truth tables.
+//
+// All operations are total and effect-free. Match is reserved for declared
+// finite types in current profiles, so these bodies branch with if/else.
+module mncs.core.logic.v1;
+
+fn bool_not(a: bool) -> (result: bool) {
+    if a {
+        return false;
+    }
+    return true;
+}
+
+fn bool_and(a: bool, b: bool) -> (result: bool) {
+    if a {
+        return b;
+    }
+    return false;
+}
+
+fn bool_or(a: bool, b: bool) -> (result: bool) {
+    if a {
+        return true;
+    }
+    return b;
+}
+
+// Material implication, total on both operands.
+fn bool_implies(a: bool, b: bool) -> (result: bool) {
+    if a {
+        return b;
+    }
+    return true;
+}
+
+// Exclusive disjunction.
+fn bool_xor(a: bool, b: bool) -> (result: bool) {
+    if a {
+        if b {
+            return false;
+        }
+        return true;
+    }
+    return b;
+}

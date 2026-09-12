@@ -1,0 +1,146 @@
+mncs 0.10;
+
+// mncs.std.json_stream — scalar structural JSON stream state.
+//
+// The browser adapter feeds <=64-byte views to this module. The stream
+// envelope validates the safety-critical lexical structure needed while a
+// document is chunked: quoted strings, JSON escapes, four-digit Unicode
+// escapes, control-byte rejection, matching object/array delimiters, bounded
+// nesting, and exactly one root value. Full JSON token and separator grammar
+// is owned by mncs.std.json.v1 and remains the stronger validation contract
+// for complete bounded inputs.
+module mncs.std.json_stream.v1;
+
+// Packed fields: 24-bit container-kind stack, depth (6 bits), string mode,
+// escape mode, started marker, four-bit Unicode digit countdown, root-complete
+// marker, and a fixed validity marker.
+fn stack_weight(depth: i64) -> (result: i64) {
+    if depth == 0 { return 1; }
+    if depth == 1 { return 4; }
+    if depth == 2 { return 16; }
+    if depth == 3 { return 64; }
+    if depth == 4 { return 256; }
+    if depth == 5 { return 1024; }
+    if depth == 6 { return 4096; }
+    if depth == 7 { return 16384; }
+    if depth == 8 { return 65536; }
+    if depth == 9 { return 262144; }
+    if depth == 10 { return 1048576; }
+    return 4194304;
+}
+
+fn stack(state: i64) -> (result: i64) { return state % 16777216; }
+fn depth(state: i64) -> (result: i64) { return (state / 16777216) % 64; }
+fn string_mode(state: i64) -> (result: bool) { return ((state / 1073741824) % 2) == 1; }
+fn escape_mode(state: i64) -> (result: bool) { return ((state / 2147483648) % 2) == 1; }
+fn started(state: i64) -> (result: bool) { return ((state / 8589934592) % 2) == 1; }
+fn unicode_remaining(state: i64) -> (result: i64) { return (state / 34359738368) % 8; }
+fn root_complete(state: i64) -> (result: bool) { return ((state / 274877906944) % 2) == 1; }
+fn is_space(value: byte) -> (result: bool) {
+    return value == 9 || value == 10 || value == 13 || value == 32;
+}
+fn is_non_space(value: byte) -> (result: bool) {
+    return value != 9 && value != 10 && value != 13 && value != 32;
+}
+fn is_hex(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return (n >= 48 && n <= 57) || (n >= 65 && n <= 70) || (n >= 97 && n <= 102);
+}
+
+fn pack(
+    stack_value: i64,
+    depth_value: i64,
+    string_value: bool,
+    escape_value: bool,
+    started_value: bool,
+    unicode_value: i64,
+    complete_value: bool
+) -> (result: i64) {
+    return stack_value
+        +% depth_value *% 16777216
+        +% (string_value as i64) *% 1073741824
+        +% (escape_value as i64) *% 2147483648
+        +% (started_value as i64) *% 8589934592
+        +% unicode_value *% 34359738368
+        +% (complete_value as i64) *% 274877906944
+        +% 17179869184;
+}
+
+fn init() -> (result: i64) {
+    return pack(0, 0, false, false, false, 0, false);
+}
+
+fn feed(state: i64, value: byte) -> (result: i64) {
+    if state == 0 { return 0; }
+    let stack_value: i64 = stack(state);
+    let depth_value: i64 = depth(state);
+    let in_string: bool = string_mode(state);
+    let escaped: bool = escape_mode(state);
+    let seen: bool = started(state);
+    let complete: bool = root_complete(state);
+
+    // Once the root closes, only JSON whitespace may follow. A second root
+    // or any trailing byte is a malformed stream rather than a new document.
+    if complete {
+        if is_space(value) { return state; }
+        return 0;
+    }
+
+    if in_string {
+        if unicode_remaining(state) > 0 {
+            if is_hex(value) {
+                return pack(stack_value, depth_value, true, false, true, unicode_remaining(state) - 1, false);
+            }
+            return 0;
+        }
+        if escaped {
+            if value == 117 {
+                return pack(stack_value, depth_value, true, false, true, 4, false);
+            }
+            if value == 34 || value == 92 || value == 47 || value == 98 || value == 102 || value == 110 || value == 114 || value == 116 {
+                return pack(stack_value, depth_value, true, false, true, 0, false);
+            }
+            return 0;
+        }
+        if value == 92 { return pack(stack_value, depth_value, true, true, true, 0, false); }
+        if value == 34 {
+            return pack(stack_value, depth_value, false, false, true, 0, depth_value == 0);
+        }
+        if (value as i64) < 32 { return 0; }
+        return pack(stack_value, depth_value, true, false, true, 0, false);
+    }
+
+    if value == 34 { return pack(stack_value, depth_value, true, false, true, 0, false); }
+    if value == 123 || value == 91 {
+        if depth_value >= 12 { return 0; }
+        let kind: i64 = select(value == 123, 1, 2);
+        return pack(stack_value +% kind *% stack_weight(depth_value), depth_value + 1, false, false, true, 0, false);
+    }
+    if value == 125 || value == 93 {
+        if depth_value == 0 { return 0; }
+        let entry: i64 = (stack_value / stack_weight(depth_value - 1)) % 4;
+        let kind: i64 = select(value == 125, 1, 2);
+        if entry != kind { return 0; }
+        return pack(stack_value - entry *% stack_weight(depth_value - 1), depth_value - 1, false, false, true, 0, depth_value == 1);
+    }
+    if depth_value == 0 && seen && is_space(value) {
+        return pack(stack_value, depth_value, false, false, true, 0, true);
+    }
+    return pack(stack_value, depth_value, false, false, seen || is_non_space(value), 0, false);
+}
+
+fn feed_chunk(state: i64, input: [byte; up_to 64]) -> (result: i64) {
+    iterate i over input carrying current: i64 = state {
+        next current = feed(current, input[i]);
+    }
+    return current;
+}
+
+fn finish(state: i64) -> (result: i64) {
+    if state == 0 { return 0 - 101; }
+    if depth(state) == 0 && started(state) {
+        if string_mode(state) || unicode_remaining(state) > 0 { return 0 - 1; }
+        return 1;
+    }
+    return 0 - 1;
+}

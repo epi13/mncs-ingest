@@ -1,0 +1,62 @@
+mncs 0.10;
+
+// mncs.std.text_view — bounded, host-neutral text references.
+//
+// A TextView is a borrowed span into an explicitly supplied byte stream. It
+// does not imply ownership, allocation, or a particular host string type. The
+// producer records whether the span contains JSON escape sequences and whether
+// the UTF-8 boundary checks completed. A host may decode a valid unescaped
+// span directly, or hand an encoded span to a JSON-string decoder.
+module mncs.std.text_view.v1;
+
+record TextView {
+    start: u64,
+    length: u64,
+    encoded: bool,
+    utf8_valid: bool
+}
+
+fn empty() -> (result: TextView) {
+    return TextView { start: 0, length: 0, encoded: false, utf8_valid: true };
+}
+
+fn span(start: u64, length: u64, encoded: bool, utf8_valid: bool) -> (result: TextView) {
+    return TextView { start: start, length: length, encoded: encoded, utf8_valid: utf8_valid };
+}
+
+fn end(view: TextView) -> (result: u64) {
+    return view.start +% view.length;
+}
+
+fn is_empty(view: TextView) -> (result: bool) {
+    return view.length == 0;
+}
+
+fn is_decodable(view: TextView) -> (result: bool) {
+    return view.utf8_valid;
+}
+
+// Bounded ASCII/key matching is deliberately generic. Callers provide the
+// target bytes and length; the library does not own a schema or a field name.
+fn matches16(value: [byte; 16], value_length: u64, target: [byte; 16], target_length: u64) -> (result: bool) {
+    let valid_length: bool = value_length == target_length && value_length <= 16;
+    iterate i over value carrying same: bool = valid_length {
+        let in_target: bool = i < target_length;
+        let equal: bool = value[i] == target[i];
+        next same = same && select(in_target, equal, true);
+    }
+    return same;
+}
+
+// The wider matcher keeps schema consumers from having to classify a known
+// field as unknown merely because its UTF-8 spelling is longer than 16 bytes.
+// It remains bounded and allocation-free; callers still provide the target.
+fn matches32(value: [byte; 32], value_length: u64, target: [byte; 32], target_length: u64) -> (result: bool) {
+    let valid_length: bool = value_length == target_length && value_length <= 32;
+    iterate i over value carrying same: bool = valid_length {
+        let in_target: bool = i < target_length;
+        let equal: bool = value[i] == target[i];
+        next same = same && select(in_target, equal, true);
+    }
+    return same;
+}

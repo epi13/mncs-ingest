@@ -14,6 +14,7 @@ mncs-compiler = { git = "https://github.com/epi13/mncs-language.git", rev = "f7c
 mncs-codegen = { git = "https://github.com/epi13/mncs-language.git", rev = "f7c1ba3dc45b82067d06b34e828a2bed1ec10209" }
 mncs-model = { git = "https://github.com/epi13/mncs-language.git", rev = "f7c1ba3dc45b82067d06b34e828a2bed1ec10209" }
 mncs-syntax = { git = "https://github.com/epi13/mncs-language.git", rev = "f7c1ba3dc45b82067d06b34e828a2bed1ec10209" }
+mncs-embed = { git = "https://github.com/epi13/mncs-language.git", rev = "f7c1ba3dc45b82067d06b34e828a2bed1ec10209" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

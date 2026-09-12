@@ -1,0 +1,134 @@
+mncs 0.14;
+
+// mncs.flow.fields — one-field-at-a-time delimited field extraction.
+//
+// `field_at` unescapes a single field starting at `start`: the field runs
+// to the next unescaped comma or the end of the line. Backslash escapes
+// any byte except newline/CR (which always terminate lines upstream, so
+// escaping them here is malformed). The host advances with `next_start`
+// while `has_more` holds and counts fields itself (max 8 enforced
+// host-side against `has_more`, so the schema bound stays inspectable).
+//
+// Statuses: 0 field, 1 end (empty line only), 2 malformed, 3 overlong
+// (unescaped value exceeds 63 bytes).
+module mncs.flow.fields;
+
+record FieldOut {
+    status: i64,
+    value: [byte; 64],
+    value_len: u64,
+    next_start: u64,
+    has_more: bool
+}
+
+record FState {
+    buf: [byte; 64],
+    len: u64,
+    esc: bool,
+    done: bool,
+    comma: bool,
+    end_pos: u64,
+    bad: bool,
+    toolong: bool
+}
+
+fn status_field() -> (result: i64) {
+    return 0;
+}
+
+fn status_end() -> (result: i64) {
+    return 1;
+}
+
+fn status_malformed() -> (result: i64) {
+    return 2;
+}
+
+fn status_overlong() -> (result: i64) {
+    return 3;
+}
+
+fn zero64() -> (result: [byte; 64]) {
+    return [0; 64];
+}
+
+fn is_bad_byte(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return (n < 32 && n != 9) || n == 10 || n == 13;
+}
+
+// Extract the field at `start`. Only the empty line reports end(1);
+// a start at/after the end otherwise yields one empty field, so a
+// trailing comma still produces its empty tail field.
+fn field_at(line: [byte; 256], line_len: u64, start: u64) -> (result: FieldOut) {
+    let length: u64 = select(line_len <= 256, line_len, 256);
+    if start == 0 && length == 0 {
+        return FieldOut {
+            status: status_end(),
+            value: zero64(),
+            value_len: 0,
+            next_start: 0,
+            has_more: false
+        };
+    }
+    let seed: FState = FState {
+        buf: zero64(),
+        len: 0,
+        esc: false,
+        done: false,
+        comma: false,
+        end_pos: length,
+        bad: false,
+        toolong: false
+    };
+    iterate i over line carrying st: FState = seed {
+        let live: bool = i < length && i >= start && !(st.done);
+        let slot: u64 = select(i < 256, i, 0);
+        let current: byte = select(live, line[slot], (65) as byte);
+        let was_esc: bool = st.esc;
+        let opens_esc: bool = live && !(was_esc) && current == (92) as byte;
+        let closes: bool = live && !(was_esc) && current == (44) as byte;
+        // Escaping never launders a byte the field rejects: controls
+        // (including an escaped newline/CR) stay malformed. The escape
+        // exists for commas, backslashes, and printable bytes.
+        let rejected: bool = live && is_bad_byte(current);
+        let append: bool = live && !(st.done) && !(opens_esc) && !(closes) && !(rejected);
+        // Values are at most 63 bytes in a 64-slot buffer: the last
+        // slot stays empty so full-vs-overlong is exact, not approximate.
+        let room: bool = st.len < 63;
+        let keep: byte = st.buf[select(st.len < 63, st.len, 0)];
+        next st = FState {
+            buf: replace(st.buf, select(st.len < 63, st.len, 0), select(append && room, current, keep)),
+            len: select(append && room, st.len +% 1, st.len),
+            esc: select(live, opens_esc, st.esc),
+            done: st.done || closes,
+            comma: st.comma || closes,
+            end_pos: select(closes, i, st.end_pos),
+            bad: st.bad || rejected,
+            toolong: st.toolong || (append && !(room))
+        };
+    }
+    if st.bad || st.esc {
+        return fail_field(status_malformed());
+    }
+    if st.toolong {
+        return fail_field(status_overlong());
+    }
+    return FieldOut {
+        status: status_field(),
+        value: st.buf,
+        value_len: st.len,
+        next_start: select(st.comma, st.end_pos +% 1, st.end_pos),
+        has_more: st.comma
+    };
+}
+
+fn fail_field(code: i64) -> (result: FieldOut) {
+    return FieldOut {
+        status: code,
+        value: zero64(),
+        value_len: 0,
+        next_start: 0,
+        has_more: false
+    };
+}

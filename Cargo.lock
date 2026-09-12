@@ -489,11 +489,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mncs-embed"
+version = "0.1.0"
+source = "git+https://github.com/epi13/mncs-language.git?rev=f7c1ba3dc45b82067d06b34e828a2bed1ec10209#f7c1ba3dc45b82067d06b34e828a2bed1ec10209"
+dependencies = [
+ "mncs-codegen",
+ "mncs-compiler",
+ "mncs-model",
+ "mncs-syntax",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mncs-ingest"
 version = "0.1.0"
 dependencies = [
  "mncs-codegen",
  "mncs-compiler",
+ "mncs-embed",
  "mncs-model",
  "mncs-syntax",
  "serde",

@@ -1,0 +1,226 @@
+mncs 0.14;
+
+// mncs.flow.lines — incremental line splitter over chunk streams.
+//
+// A line is the bytes up to the next raw `\n`, or, at end-of-input, the
+// remaining tail. The caller streams `view` chunks (host transport) and
+// this module owns every boundary decision: newline search, CR-strip,
+// control-byte rejection, overlong lines, carry across chunks, and view
+// cursor rewind when a post-newline tail exceeds carry capacity.
+//
+// Contract:
+//   staged = carry[0..carry_len] ++ view[0..view_len] (≤ 512 bytes)
+//   statuses: 0 line, 1 need_more, 2 complete, 3 malformed, 4 overlong
+//   carry never holds a produced line; consumed counts VIEW bytes only.
+//
+// Staging uses 0.14 `copy_span` (INGEST-P-002 relief in action); the
+// newline/control folds mirror `mncs.std.chunk` at 256/512 widths
+// because stdlib scans are 64-wide monomorphs (INGEST-P-011).
+module mncs.flow.lines;
+
+record LineOut {
+    status: i64,
+    line: [byte; 256],
+    line_len: u64,
+    carry: [byte; 256],
+    carry_len: u64,
+    consumed: u64
+}
+
+record Scan {
+    nl: i64,
+    bad: bool
+}
+
+fn status_line() -> (result: i64) {
+    return 0;
+}
+
+fn status_need_more() -> (result: i64) {
+    return 1;
+}
+
+fn status_complete() -> (result: i64) {
+    return 2;
+}
+
+fn status_malformed() -> (result: i64) {
+    return 3;
+}
+
+fn status_overlong() -> (result: i64) {
+    return 4;
+}
+
+fn zero512() -> (result: [byte; 512]) {
+    return [0; 512];
+}
+
+fn zero256() -> (result: [byte; 256]) {
+    return [0; 256];
+}
+
+fn is_control(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n < 32 && n != 9 && n != 10 && n != 13;
+}
+
+// First `\n` in staged[0..total], or -1. Control bytes other than
+// tab/newline/CR anywhere in the window spoil the scan: a control byte
+// can never belong to a valid line, so failing here is sound even when
+// the newline sits later in the window.
+fn scan_newline(staged: [byte; up_to 512], total: u64) -> (result: Scan) {
+    let seed: Scan = Scan { nl: 0 - 1, bad: false };
+    iterate i over staged carrying st: Scan = seed {
+        let live: bool = i < total;
+        let slot: u64 = select(i < staged.len, i, 0);
+        let current: byte = select(live && slot < staged.len, staged[slot], (10) as byte);
+        let hit: bool = live && current == (10) as byte && st.nl == 0 - 1;
+        next st = Scan {
+            nl: select(hit, i as i64, st.nl),
+            bad: st.bad || (live && is_control(current))
+        };
+    }
+    return st;
+}
+
+// Validate line[0..raw] and strip one trailing CR. CR anywhere else, or
+// any control byte, is malformed. Returns the clean length, or -1.
+fn clean_length(staged: [byte; up_to 512], raw: u64) -> (result: i64) {
+    iterate i over staged carrying bad: bool = false {
+        let live: bool = i < raw;
+        let slot: u64 = select(i < staged.len, i, 0);
+        let current: byte = select(live && slot < staged.len, staged[slot], (65) as byte);
+        // The trailing byte may be the CR this function strips; it is
+        // judged below, not here. Any other CR is malformed.
+        let trailing: bool = raw > 0 && i == raw -% 1;
+        let struck: bool = live && (is_control(current) || (current == (13) as byte && !trailing));
+        next bad = bad || struck;
+    }
+    if bad {
+        return 0 - 1;
+    }
+    if raw > 0 {
+        let slot: u64 = select(raw -% 1 < staged.len, raw -% 1, 0);
+        let last: byte = select(raw -% 1 < staged.len, staged[slot], (65) as byte);
+        if last == (13) as byte {
+            return (raw -% 1) as i64;
+        }
+    }
+    return raw as i64;
+}
+
+fn fail_line(code: i64, consumed: u64) -> (result: LineOut) {
+    return LineOut {
+        status: code,
+        line: zero256(),
+        line_len: 0,
+        carry: zero256(),
+        carry_len: 0,
+        consumed: consumed
+    };
+}
+
+// The entry point. `eof` marks the final view; an empty tail at eof
+// completes rather than producing a phantom line.
+fn next_line(carry: [byte; 256], carry_len: u64, view: [byte; up_to 256], view_len: u64, eof: bool) -> (result: LineOut) {
+    let cc: u64 = select(carry_len <= 256, carry_len, 256);
+    let vc: u64 = select(view_len <= view.len, view_len, view.len);
+    let total: u64 = cc +% vc;
+    let stage1: [byte; 512] = copy_span(zero512(), 0, carry, 0, cc);
+    let work: [byte; 512] = copy_span(stage1, cc, view, 0, vc);
+    let staged: [byte; up_to 512] = work[0..total];
+    let found: Scan = scan_newline(staged, total);
+    if found.bad {
+        return fail_line(status_malformed(), vc);
+    }
+    if found.nl != 0 - 1 {
+        return emit_line(staged, total, cc, vc, found.nl as u64);
+    }
+    if eof {
+        return emit_tail(staged, total, vc);
+    }
+    if total > 255 {
+        return fail_line(status_overlong(), vc);
+    }
+    let held: [byte; 256] = copy_span(zero256(), 0, staged, 0, total);
+    return LineOut {
+        status: status_need_more(),
+        line: zero256(),
+        line_len: 0,
+        carry: held,
+        carry_len: total,
+        consumed: vc
+    };
+}
+
+// Newline at `at`: validate, copy the line out, carry the tail with a
+// view-cursor rewind when the tail exceeds carry capacity.
+fn emit_line(staged: [byte; up_to 512], total: u64, cc: u64, vc: u64, at: u64) -> (result: LineOut) {
+    let clean: i64 = clean_length(staged, at);
+    if clean == 0 - 1 {
+        return fail_line(status_malformed(), vc);
+    }
+    let length: u64 = clean as u64;
+    if length > 255 {
+        return fail_line(status_overlong(), vc);
+    }
+    let line: [byte; 256] = copy_span(zero256(), 0, staged, 0, length);
+    let tail: u64 = total -% (at +% 1);
+    let keep: u64 = select(tail <= 256, tail, 256);
+    let held: [byte; 256] = copy_span(zero256(), 0, staged, at +% 1, keep);
+    // View bytes covered by the kept tail. Non-negative by construction:
+    // keep always reaches past the carry region (carry <= 256, keep =
+    // min(tail, 256)), so wrapping subtraction cannot trigger here; the
+    // select only clamps the top.
+    let covered: u64 = (at +% 1 +% keep) -% cc;
+    let consumed: u64 = select(covered <= vc, covered, vc);
+    return LineOut {
+        status: status_line(),
+        line: line,
+        line_len: length,
+        carry: held,
+        carry_len: keep,
+        consumed: consumed
+    };
+}
+
+// End of input without a newline: flush the tail as a final line, or
+// complete on an empty tail.
+fn emit_tail(staged: [byte; up_to 512], total: u64, vc: u64) -> (result: LineOut) {
+    if total == 0 {
+        return LineOut {
+            status: status_complete(),
+            line: zero256(),
+            line_len: 0,
+            carry: zero256(),
+            carry_len: 0,
+            consumed: vc
+        };
+    }
+    if total > 255 {
+        return fail_line(status_overlong(), vc);
+    }
+    // A trailing CR at end-of-input cannot pair with a newline: the
+    // final CRLF was truncated, so the tail is malformed, not clean.
+    if total > 0 {
+        let slot: u64 = select(total -% 1 < staged.len, total -% 1, 0);
+        let last: byte = select(total -% 1 < staged.len, staged[slot], (65) as byte);
+        if last == (13) as byte {
+            return fail_line(status_malformed(), vc);
+        }
+    }
+    let clean: i64 = clean_length(staged, total);
+    if clean == 0 - 1 {
+        return fail_line(status_malformed(), vc);
+    }
+    let line: [byte; 256] = copy_span(zero256(), 0, staged, 0, clean as u64);
+    return LineOut {
+        status: status_line(),
+        line: line,
+        line_len: clean as u64,
+        carry: zero256(),
+        carry_len: 0,
+        consumed: vc
+    };
+}

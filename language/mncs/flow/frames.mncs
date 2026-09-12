@@ -1,0 +1,224 @@
+mncs 0.14;
+
+// mncs.flow.frames — incremental length-prefixed binary frame decoder.
+//
+// Wire format (telemetry frame v1, all multi-byte fields little-endian):
+//   offset  size  field
+//   0       2     magic 0x4D43 ("MC")
+//   2       1     version (1 supported)
+//   3       1     kind tag (0 sensor, 1 event, 2 heartbeat)
+//   4       2     payload length (0..=128)
+//   6       N     payload bytes
+//   6+N     2     checksum: sum of all preceding frame bytes mod 65536
+//
+// Like the line splitter, the caller streams views and this module owns
+// every boundary decision — including incomplete-vs-malformed, which is
+// load-bearing for resumable ingestion: a short header mid-stream is
+// need_more, the same bytes at end-of-input are truncated.
+//
+// Statuses: 0 frame, 1 need_more, 2 complete, 3 malformed, 4
+// bad_checksum, 5 truncated, 6 unsupported_version, 7 bad_tag.
+//
+// Endian readers are local, not vendored `mncs.std.encoding`: those
+// readers take 64-bound views and a 392-byte stage cannot narrow into
+// them when the live span exceeds 64 (INGEST-P-011). Checksum and
+// framing are ingest-owned either way.
+module mncs.flow.frames;
+
+record FrameOut {
+    status: i64,
+    version: u64,
+    kind: u64,
+    payload: [byte; 128],
+    payload_len: u64,
+    frame_len: u64,
+    carry: [byte; 136],
+    carry_len: u64,
+    consumed: u64
+}
+
+fn status_frame() -> (result: i64) {
+    return 0;
+}
+
+fn status_need_more() -> (result: i64) {
+    return 1;
+}
+
+fn status_complete() -> (result: i64) {
+    return 2;
+}
+
+fn status_malformed() -> (result: i64) {
+    return 3;
+}
+
+fn status_bad_checksum() -> (result: i64) {
+    return 4;
+}
+
+fn status_truncated() -> (result: i64) {
+    return 5;
+}
+
+fn status_version() -> (result: i64) {
+    return 6;
+}
+
+fn status_tag() -> (result: i64) {
+    return 7;
+}
+
+fn zero128() -> (result: [byte; 128]) {
+    return [0; 128];
+}
+
+fn zero136() -> (result: [byte; 136]) {
+    return [0; 136];
+}
+
+fn zero392() -> (result: [byte; 392]) {
+    return [0; 392];
+}
+
+fn magic_lo() -> (result: byte) {
+    return (67) as byte;
+}
+
+fn magic_hi() -> (result: byte) {
+    return (77) as byte;
+}
+
+fn max_payload() -> (result: u64) {
+    return 128;
+}
+
+// Little-endian u16 over any stage width. Callers gate the offset first:
+// out-of-window reads trap deterministically, so every call below is
+// dominated by an explicit length branch (the documented contract).
+fn read_u16_le(staged: [byte; up_to 392], offset: u64) -> (result: u64) {
+    let lo: u64 = staged[offset] as u64;
+    let hi: u64 = staged[offset +% 1] as u64;
+    return lo +% hi *% 256;
+}
+
+// Checksum: wrapping byte sum mod 65536 over staged[0..cover].
+fn checksum(staged: [byte; up_to 392], cover: u64) -> (result: u64) {
+    iterate i over staged carrying acc: u64 = 0 {
+        let live: bool = i < cover;
+        let slot: u64 = select(i < staged.len, i, 0);
+        let current: byte = select(live && slot < staged.len, staged[slot], (0) as byte);
+        next acc = select(live, (acc +% current as u64) % 65536, acc);
+    }
+    return acc;
+}
+
+fn fail_frame(code: i64, carry: [byte; 136], carry_len: u64, consumed: u64) -> (result: FrameOut) {
+    return FrameOut {
+        status: code,
+        version: 0,
+        kind: 0,
+        payload: zero128(),
+        payload_len: 0,
+        frame_len: 0,
+        carry: carry,
+        carry_len: carry_len,
+        consumed: consumed
+    };
+}
+
+// The entry point. Incomplete input mid-stream asks for more; the same
+// bytes at end-of-input are truncated — never silently, never confused.
+fn decode_frame(carry: [byte; 136], carry_len: u64, view: [byte; up_to 256], view_len: u64, eof: bool) -> (result: FrameOut) {
+    let cc: u64 = select(carry_len <= 136, carry_len, 136);
+    let vc: u64 = select(view_len <= view.len, view_len, view.len);
+    let total: u64 = cc +% vc;
+    let stage1: [byte; 392] = copy_span(zero392(), 0, carry, 0, cc);
+    let work: [byte; 392] = copy_span(stage1, cc, view, 0, vc);
+    let staged: [byte; up_to 392] = work[0..total];
+    if total == 0 {
+        return FrameOut {
+            status: select(eof, status_complete(), status_need_more()),
+            version: 0,
+            kind: 0,
+            payload: zero128(),
+            payload_len: 0,
+            frame_len: 0,
+            carry: zero136(),
+            carry_len: 0,
+            consumed: 0
+        };
+    }
+    if total < 6 {
+        if eof {
+            return fail_frame(status_truncated(), zero136(), 0, vc);
+        }
+        let held: [byte; 136] = copy_span(zero136(), 0, staged, 0, total);
+        return FrameOut {
+            status: status_need_more(),
+            version: 0,
+            kind: 0,
+            payload: zero128(),
+            payload_len: 0,
+            frame_len: 0,
+            carry: held,
+            carry_len: total,
+            consumed: vc
+        };
+    }
+    if staged[0] != magic_lo() || staged[1] != magic_hi() {
+        return fail_frame(status_malformed(), zero136(), 0, vc);
+    }
+    let version: u64 = staged[2] as u64;
+    if version != 1 {
+        return fail_frame(status_version(), zero136(), 0, vc);
+    }
+    let kind: u64 = staged[3] as u64;
+    if kind > 2 {
+        return fail_frame(status_tag(), zero136(), 0, vc);
+    }
+    let payload_len: u64 = read_u16_le(staged, 4);
+    if payload_len > max_payload() {
+        return fail_frame(status_malformed(), zero136(), 0, vc);
+    }
+    let frame_len: u64 = 6 +% payload_len +% 2;
+    if total < frame_len {
+        if eof {
+            return fail_frame(status_truncated(), zero136(), 0, vc);
+        }
+        let held: [byte; 136] = copy_span(zero136(), 0, staged, 0, total);
+        return FrameOut {
+            status: status_need_more(),
+            version: 0,
+            kind: 0,
+            payload: zero128(),
+            payload_len: 0,
+            frame_len: 0,
+            carry: held,
+            carry_len: total,
+            consumed: vc
+        };
+    }
+    let want: u64 = read_u16_le(staged, 6 +% payload_len);
+    let got: u64 = checksum(staged, 6 +% payload_len);
+    if want != got {
+        return fail_frame(status_bad_checksum(), zero136(), 0, vc);
+    }
+    let payload: [byte; 128] = copy_span(zero128(), 0, staged, 6, payload_len);
+    let tail: u64 = total -% frame_len;
+    let keep: u64 = select(tail <= 136, tail, 136);
+    let held: [byte; 136] = copy_span(zero136(), 0, staged, frame_len, keep);
+    let covered: u64 = (frame_len +% keep) -% cc;
+    let consumed: u64 = select(covered <= vc, covered, vc);
+    return FrameOut {
+        status: status_frame(),
+        version: version,
+        kind: kind,
+        payload: payload,
+        payload_len: payload_len,
+        frame_len: frame_len,
+        carry: held,
+        carry_len: keep,
+        consumed: consumed
+    };
+}

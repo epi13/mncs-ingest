@@ -12,6 +12,11 @@ module mncs.ingest;
 use mncs.ingest.vocab as vocab;
 use mncs.ingest.parse as parse;
 use mncs.ingest.frame as frame;
+use mncs.flow.lines as lines;
+use mncs.flow.fields as fields;
+use mncs.flow.frames as frames;
+use mncs.flow.nest as nest;
+use mncs.flow.manifest as manifest;
 
 // Bounded text path: raw sentence bytes in, canonical role spans out.
 fn ingest_parse(text: [byte; up_to 64], length: u64) -> (result: parse.TransferParse) {
@@ -52,6 +57,50 @@ fn ingest_sort_codes(xs: [u64; 8], count: u64) -> (result: [u64; 8]) {
 
 fn ingest_is_sorted(xs: [u64; 8], count: u64) -> (result: i64) {
     return frame.is_sorted_codes(xs, count);
+}
+
+// Streaming line path: one chunk in, at most one line plus carry out.
+// The host windows the stream into <=256-byte views; every boundary,
+// validation, and cursor decision executes here.
+fn ingest_next_line(carry: [byte; 256], carry_len: u64, view: [byte; up_to 256], view_len: u64, eof: bool) -> (result: lines.LineOut) {
+    return lines.next_line(carry, carry_len, view, view_len, eof);
+}
+
+// Streaming field path: unescape one field starting at `start`.
+fn ingest_field_at(line: [byte; 256], line_len: u64, start: u64) -> (result: fields.FieldOut) {
+    return fields.field_at(line, line_len, start);
+}
+
+// Streaming binary-frame path: stage carry plus one chunk view.
+fn ingest_decode_frame(carry: [byte; 136], carry_len: u64, view: [byte; up_to 256], view_len: u64, eof: bool) -> (result: frames.FrameOut) {
+    return frames.decode_frame(carry, carry_len, view, view_len, eof);
+}
+
+// Incremental manifest scan: records cannot cross into calls without a
+// forged type identity, so scanner state decomposes into scalar lanes
+// (INGEST-P-009); the state record is rebuilt inside.
+fn ingest_scan_chunk(depth: u64, stack: [u64; 4], expect: u64, in_string: bool, esc: bool, max_depth: u64, seen_value: bool, in_literal: bool, after_comma: bool, view: [byte; up_to 256], view_len: u64, base: u64, eof: bool) -> (result: nest.ScanOut) {
+    let state: nest.NestState = nest.NestState {
+        depth: depth,
+        stack: stack,
+        expect: expect,
+        in_string: in_string,
+        esc: esc,
+        max_depth: max_depth,
+        seen_value: seen_value,
+        in_literal: in_literal,
+        after_comma: after_comma
+    };
+    return nest.scan_chunk(state, view, view_len, base, eof);
+}
+
+// Manifest extraction over staged bytes of a complete document.
+fn ingest_pair_count(doc: [byte; 512], doc_len: u64) -> (result: i64) {
+    return manifest.pair_count(doc, doc_len);
+}
+
+fn ingest_pair_at(doc: [byte; 512], doc_len: u64, index: u64) -> (result: manifest.PairOut) {
+    return manifest.pair_at(doc, doc_len, index);
 }
 
 // Diagnostics entry point: exposes splitter/classifier internals as

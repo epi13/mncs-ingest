@@ -1,0 +1,600 @@
+mncs 0.14;
+
+// mncs.flow.manifest — typed pair extraction over validated manifests.
+//
+// Phase 1 (`mncs.flow.nest`) proves structure incrementally; this module
+// extracts content from the staged bytes of a COMPLETE document. The
+// host only calls it after `complete`, and every scan still fails closed
+// on unexpected bytes — extraction never assumes validity.
+//
+// Pairs live at depth 1. Values classify as string (unescaped here),
+// integer (±99999), boolean, or nested (opaque span the host may
+// re-stage as its own document — recursion via transport, documented).
+// One pair per call (`pair_at`); the host loops to `pair_count`.
+//
+// Statuses: 0 ok, 1 end (index past the last pair), 2 malformed,
+// 3 overlong (key > 32, string value > 64).
+module mncs.flow.manifest;
+
+record PairOut {
+    status: i64,
+    key: [byte; 32],
+    key_len: u64,
+    kstart: u64,
+    kind: i64,
+    sval: [byte; 64],
+    sval_len: u64,
+    ival: i64,
+    bval: bool,
+    vstart: u64,
+    vlen: u64
+}
+
+record Loc {
+    status: i64,
+    kstart: u64,
+    klen: u64,
+    vstart: u64,
+    vlen: u64
+}
+
+fn status_ok() -> (result: i64) {
+    return 0;
+}
+
+fn status_end() -> (result: i64) {
+    return 1;
+}
+
+fn status_malformed() -> (result: i64) {
+    return 2;
+}
+
+fn status_overlong() -> (result: i64) {
+    return 3;
+}
+
+fn kind_string() -> (result: i64) {
+    return 1;
+}
+
+fn kind_int() -> (result: i64) {
+    return 2;
+}
+
+fn kind_bool() -> (result: i64) {
+    return 3;
+}
+
+fn kind_nested() -> (result: i64) {
+    return 4;
+}
+
+fn zero32() -> (result: [byte; 32]) {
+    return [0; 32];
+}
+
+fn zero64() -> (result: [byte; 64]) {
+    return [0; 64];
+}
+
+fn is_space(value: byte) -> (result: bool) {
+    return value == (32) as byte || value == (9) as byte || value == (10) as byte || value == (13) as byte;
+}
+
+fn is_digit(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n >= 48 && n <= 57;
+}
+
+fn fail_pair(code: i64) -> (result: PairOut) {
+    return PairOut {
+        status: code,
+        key: zero32(),
+        key_len: 0,
+        kstart: 0,
+        kind: 0,
+        sval: zero64(),
+        sval_len: 0,
+        ival: 0,
+        bval: false,
+        vstart: 0,
+        vlen: 0
+    };
+}
+
+// Colons at depth exactly 1 outside strings: one per pair.
+fn pair_count(doc: [byte; 512], doc_len: u64) -> (result: i64) {
+    let length: u64 = select(doc_len <= 512, doc_len, 512);
+    iterate i over doc carrying st: CountSt = CountSt { depth: 0, instr: false, esc: false, count: 0 } {
+        let live: bool = i < length;
+        let slot: u64 = select(i < 512, i, 0);
+        let current: byte = select(live, doc[slot], (32) as byte);
+        next st = count_step(st, current, live);
+    }
+    return st.count;
+}
+
+record CountSt {
+    depth: u64,
+    instr: bool,
+    esc: bool,
+    count: i64
+}
+
+fn count_step(st: CountSt, current: byte, live: bool) -> (result: CountSt) {
+    if !(live) {
+        return st;
+    }
+    if st.instr {
+        if st.esc {
+            return CountSt { ..st, esc: false };
+        }
+        if current == (92) as byte {
+            return CountSt { ..st, esc: true };
+        }
+        if current == (34) as byte {
+            return CountSt { ..st, instr: false };
+        }
+        return st;
+    }
+    if current == (34) as byte {
+        return CountSt { ..st, instr: true, esc: false };
+    }
+    if current == (123) as byte || current == (91) as byte {
+        return CountSt { ..st, depth: st.depth +% 1 };
+    }
+    if current == (125) as byte || current == (93) as byte {
+        return CountSt { ..st, depth: st.depth -% 1 };
+    }
+    if current == (58) as byte && st.depth == 1 {
+        return CountSt { ..st, count: st.count +% 1 };
+    }
+    return st;
+}
+
+// Locate the index-th pair: snapshots the key span and value span in one
+// pass. The value is SKIPPED (not interpreted) here; `read_value`
+// interprets it. Closer matching mirrors the nest scanner so even a
+// hostile (unvalidated) document fails closed instead of mislocating.
+//
+// Phases: 0 seek key quote / root open / empty-container close,
+// 1 inside key (implies in-string), 2 seek colon, 3 seek value start,
+// 5 seek comma-or-close (after a value).
+fn locate_pair(doc: [byte; 512], doc_len: u64, index: u64) -> (result: Loc) {
+    let length: u64 = select(doc_len <= 512, doc_len, 512);
+    let seed: LocSt = LocSt {
+        depth: 0,
+        stack: [(0) as u64, (0) as u64, (0) as u64, (0) as u64],
+        instr: false,
+        esc: false,
+        inkey: false,
+        pair: 0,
+        phase: 0,
+        kstart: 0,
+        kend: 0,
+        fkstart: 0,
+        fkend: 0,
+        vstart: 0,
+        vend: 0,
+        want: false,
+        skipping: false,
+        skip_depth: 0,
+        done: false,
+        oversize: false,
+        bad: false
+    };
+    iterate i over doc carrying st: LocSt = seed {
+        let live: bool = i < length && !(st.done) && !(st.bad) && !(st.oversize);
+        let slot: u64 = select(i < 512, i, 0);
+        let current: byte = select(live, doc[slot], (32) as byte);
+        next st = locate_step(st, current, i, live, index);
+    }
+    if st.bad {
+        return Loc { status: status_malformed(), kstart: 0, klen: 0, vstart: 0, vlen: 0 };
+    }
+    if st.oversize {
+        return Loc { status: status_overlong(), kstart: 0, klen: 0, vstart: 0, vlen: 0 };
+    }
+    if !(st.done) {
+        return Loc { status: status_end(), kstart: 0, klen: 0, vstart: 0, vlen: 0 };
+    }
+    return Loc { status: status_ok(), kstart: st.fkstart, klen: st.fkend -% st.fkstart, vstart: st.vstart, vlen: st.vend -% st.vstart };
+}
+
+record LocSt {
+    depth: u64,
+    stack: [u64; 4],
+    instr: bool,
+    esc: bool,
+    inkey: bool,
+    pair: u64,
+    phase: u64,
+    kstart: u64,
+    kend: u64,
+    fkstart: u64,
+    fkend: u64,
+    vstart: u64,
+    vend: u64,
+    want: bool,
+    skipping: bool,
+    skip_depth: u64,
+    done: bool,
+    oversize: bool,
+    bad: bool
+}
+
+fn locate_step(st: LocSt, current: byte, i: u64, live: bool, index: u64) -> (result: LocSt) {
+    if !(live) {
+        return st;
+    }
+    if st.skipping {
+        return skip_step(st, current, i);
+    }
+    if st.instr {
+        if st.esc {
+            return LocSt { ..st, esc: false };
+        }
+        if current == (92) as byte {
+            return LocSt { ..st, esc: true };
+        }
+        if current == (34) as byte {
+            return LocSt { ..st, instr: false, inkey: false, kend: i, phase: select(st.inkey, 2, st.phase) };
+        }
+        return st;
+    }
+    if is_space(current) {
+        return st;
+    }
+    if current == (34) as byte {
+        if st.phase == 0 && st.depth == 1 {
+            return LocSt { ..st, instr: true, esc: false, inkey: true, phase: 1, kstart: i +% 1 };
+        }
+        if st.phase == 3 {
+            return begin_value(st, i, false, true, index);
+        }
+        return LocSt { ..st, bad: true };
+    }
+    if current == (123) as byte || current == (91) as byte {
+        if st.phase == 3 {
+            return begin_value(st, i, true, false, index);
+        }
+        if st.phase == 0 && st.depth == 0 && current == (123) as byte {
+            return LocSt { ..st, depth: 1, stack: replace(st.stack, 0, 1) };
+        }
+        return LocSt { ..st, bad: true };
+    }
+    if current == (125) as byte || current == (93) as byte {
+        return close_step(st, current);
+    }
+    if current == (58) as byte {
+        if st.phase == 2 {
+            return LocSt { ..st, phase: 3 };
+        }
+        return LocSt { ..st, bad: true };
+    }
+    if current == (44) as byte {
+        if st.phase == 5 {
+            return LocSt { ..st, phase: 0, pair: st.pair +% 1 };
+        }
+        return LocSt { ..st, bad: true };
+    }
+    if st.phase == 3 {
+        return begin_value(st, i, false, false, index);
+    }
+    return LocSt { ..st, bad: true };
+}
+
+// Snapshot the value start and skip to its end. Keys longer than 32
+// bytes are overlong, decided here where the key span is known.
+fn begin_value(st: LocSt, i: u64, nested: bool, quoted: bool, index: u64) -> (result: LocSt) {
+    let want: bool = st.pair == index;
+    let klen: u64 = st.kend -% st.kstart;
+    return LocSt {
+        ..st,
+        fkstart: select(want, st.kstart, st.fkstart),
+        fkend: select(want, st.kend, st.fkend),
+        vstart: select(want, i, st.vstart),
+        want: want,
+        skipping: true,
+        skip_depth: select(nested, 1, 0),
+        instr: quoted,
+        esc: false,
+        phase: 5,
+        oversize: st.oversize || (want && klen > 32)
+    };
+}
+
+fn close_step(st: LocSt, current: byte) -> (result: LocSt) {
+    if st.depth == 0 {
+        return LocSt { ..st, bad: true };
+    }
+    let slot: u64 = select(st.depth -% 1 < 4, st.depth -% 1, 0);
+    let want: u64 = select(current == (125) as byte, 1, 2);
+    if st.stack[slot] != want {
+        return LocSt { ..st, bad: true };
+    }
+    if st.phase != 0 && st.phase != 5 {
+        return LocSt { ..st, bad: true };
+    }
+    return LocSt { ..st, depth: st.depth -% 1 };
+}
+
+// Skip the rest of a value to its first top-level delimiter, recording
+// the value end for the wanted pair only.
+fn skip_step(st: LocSt, current: byte, i: u64) -> (result: LocSt) {
+    if st.instr {
+        if st.esc {
+            return LocSt { ..st, esc: false };
+        }
+        if current == (92) as byte {
+            return LocSt { ..st, esc: true };
+        }
+        if current == (34) as byte {
+            return LocSt { ..st, instr: false };
+        }
+        return st;
+    }
+    if current == (34) as byte {
+        return LocSt { ..st, instr: true, esc: false };
+    }
+    if current == (123) as byte || current == (91) as byte {
+        return LocSt { ..st, skip_depth: st.skip_depth +% 1 };
+    }
+    if current == (125) as byte || current == (93) as byte || current == (44) as byte {
+        if st.skip_depth == 0 {
+            // A comma ending an UNWANTED value is the pair separator:
+            // advance exactly as if locate_step had seen it at phase 5.
+            // (A wanted pair freezes via done, so this only fires for
+            // skipped values; closers keep phase 5 for close_step.)
+            let sep: bool = current == (44) as byte && !(st.want);
+            return LocSt {
+                ..st,
+                skipping: false,
+                vend: select(st.want, i, st.vend),
+                done: st.want,
+                phase: select(sep, 0, st.phase),
+                pair: select(sep, st.pair +% 1, st.pair)
+            };
+        }
+        if current != (44) as byte {
+            return LocSt { ..st, skip_depth: st.skip_depth -% 1 };
+        }
+        return st;
+    }
+    return st;
+}
+
+// Interpret the value at [vstart..vstart+vlen): strings unescape here,
+// integers range-check, booleans match exactly, nested values stay
+// opaque spans. The key copies from [kstart..kstart+klen).
+fn pair_at(doc: [byte; 512], doc_len: u64, index: u64) -> (result: PairOut) {
+    let found: Loc = locate_pair(doc, doc_len, index);
+    if found.status != status_ok() {
+        return fail_pair(found.status);
+    }
+    let key: [byte; 32] = copy_span(zero32(), 0, doc, found.kstart, found.klen);
+    let first: byte = doc_byte(doc, doc_len, found.vstart);
+    if first == (34) as byte {
+        return read_string(doc, doc_len, found, key);
+    }
+    if first == (123) as byte || first == (91) as byte {
+        return PairOut {
+            status: status_ok(),
+            key: key,
+            key_len: found.klen,
+            kstart: found.kstart,
+            kind: kind_nested(),
+            sval: zero64(),
+            sval_len: 0,
+            ival: 0,
+            bval: false,
+            vstart: found.vstart,
+            vlen: found.vlen
+        };
+    }
+    if first == (116) as byte {
+        return read_literal(doc, doc_len, found, key, true);
+    }
+    if first == (102) as byte {
+        return read_literal(doc, doc_len, found, key, false);
+    }
+    if first == (45) as byte || is_digit(first) {
+        return read_int(doc, doc_len, found, key);
+    }
+    return fail_pair(status_malformed());
+}
+
+fn doc_byte(doc: [byte; 512], doc_len: u64, at: u64) -> (result: byte) {
+    let length: u64 = select(doc_len <= 512, doc_len, 512);
+    let slot: u64 = select(at < length && at < 512, at, 0);
+    return select(at < length && at < 512, doc[slot], (0) as byte);
+}
+
+// Unescape a quoted value into a 64-byte buffer. Only \" \\ \n \t
+// survive; \u and friends are malformed (INGEST-P-003).
+fn read_string(doc: [byte; 512], doc_len: u64, found: Loc, key: [byte; 32]) -> (result: PairOut) {
+    let length: u64 = select(doc_len <= 512, doc_len, 512);
+    let vend: u64 = found.vstart +% found.vlen;
+    iterate i over doc carrying st: StrSt = StrSt { buf: zero64(), len: 0, esc: false, bad: false, toolong: false, closed: false } {
+        // Content window excludes both quotes: (vstart, vend). The fold
+        // keeps observing after overflow (no toolong gate): the closing
+        // quote must still register, or `closed` stays false and the
+        // malformed check below shadows the overlong verdict.
+        let live: bool = i > found.vstart && i < vend && i < length && !(st.closed) && !(st.bad);
+        let slot: u64 = select(i < 512, i, 0);
+        let current: byte = select(live, doc[slot], (97) as byte);
+        next st = string_step(st, current, live);
+    }
+    if st.bad || !(st.closed) {
+        return fail_pair(status_malformed());
+    }
+    if st.toolong {
+        return fail_pair(status_overlong());
+    }
+    return PairOut {
+        status: status_ok(),
+        key: key,
+        key_len: found.klen,
+        kstart: found.kstart,
+        kind: kind_string(),
+        sval: st.buf,
+        sval_len: st.len,
+        ival: 0,
+        bval: false,
+        vstart: found.vstart,
+        vlen: found.vlen
+    };
+}
+
+record StrSt {
+    buf: [byte; 64],
+    len: u64,
+    esc: bool,
+    bad: bool,
+    toolong: bool,
+    closed: bool
+}
+
+fn string_step(st: StrSt, current: byte, live: bool) -> (result: StrSt) {
+    if !(live) {
+        return st;
+    }
+    if st.esc {
+        if current == (34) as byte || current == (92) as byte {
+            return append_byte(st, current);
+        }
+        if current == (110) as byte {
+            return append_byte(st, (10) as byte);
+        }
+        if current == (116) as byte {
+            return append_byte(st, (9) as byte);
+        }
+        return StrSt { ..st, bad: true };
+    }
+    if current == (92) as byte {
+        return StrSt { ..st, esc: true };
+    }
+    if current == (34) as byte {
+        return StrSt { ..st, closed: true };
+    }
+    if is_control_str(current) {
+        return StrSt { ..st, bad: true };
+    }
+    return append_byte(st, current);
+}
+
+fn is_control_str(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n < 32;
+}
+
+fn append_byte(st: StrSt, value: byte) -> (result: StrSt) {
+    let room: bool = st.len < 64;
+    let slot: u64 = select(room, st.len, 0);
+    let keep: byte = st.buf[slot];
+    return StrSt {
+        ..st,
+        buf: replace(st.buf, slot, select(room, value, keep)),
+        len: select(room, st.len +% 1, st.len),
+        esc: false,
+        toolong: st.toolong || !(room)
+    };
+}
+
+// Booleans match exactly: "true" (4) or "false" (5), no prefixes.
+fn read_literal(doc: [byte; 512], doc_len: u64, found: Loc, key: [byte; 32], want_true: bool) -> (result: PairOut) {
+    let expect_len: u64 = select(want_true, 4, 5);
+    if found.vlen != expect_len {
+        return fail_pair(status_malformed());
+    }
+    let ok: bool = match_word(doc, found.vstart, want_true);
+    if !(ok) {
+        return fail_pair(status_malformed());
+    }
+    return PairOut {
+        status: status_ok(),
+        key: key,
+        key_len: found.klen,
+        kstart: found.kstart,
+        kind: kind_bool(),
+        sval: zero64(),
+        sval_len: 0,
+        ival: 0,
+        bval: want_true,
+        vstart: found.vstart,
+        vlen: found.vlen
+    };
+}
+
+fn match_word(doc: [byte; 512], at: u64, want_true: bool) -> (result: bool) {
+    let t0: byte = doc_byte(doc, 512, at);
+    let t1: byte = doc_byte(doc, 512, at +% 1);
+    let t2: byte = doc_byte(doc, 512, at +% 2);
+    let t3: byte = doc_byte(doc, 512, at +% 3);
+    if want_true {
+        return t0 == (116) as byte && t1 == (114) as byte && t2 == (117) as byte && t3 == (101) as byte;
+    }
+    let t4: byte = doc_byte(doc, 512, at +% 4);
+    return t0 == (102) as byte && t1 == (97) as byte && t2 == (108) as byte && t3 == (115) as byte && t4 == (101) as byte;
+}
+
+// Integers: optional `-`, 1..=5 digits, value within ±99999. Leading
+// zeros are accepted (canonicalization is a later layer, not parsing).
+fn read_int(doc: [byte; 512], doc_len: u64, found: Loc, key: [byte; 32]) -> (result: PairOut) {
+    let length: u64 = select(doc_len <= 512, doc_len, 512);
+    let vend: u64 = found.vstart +% found.vlen;
+    iterate i over doc carrying st: IntSt = IntSt { value: 0, digits: 0, neg: false, bad: false } {
+        let live: bool = i >= found.vstart && i < vend && i < length;
+        let slot: u64 = select(i < 512, i, 0);
+        let current: byte = select(live, doc[slot], (48) as byte);
+        next st = int_step(st, current, i, found.vstart, live);
+    }
+    if st.bad || st.digits == 0 || st.digits > 5 {
+        return fail_pair(status_malformed());
+    }
+    let value: i64 = select(st.neg, 0 -% st.value, st.value);
+    if value > 99999 || value < 0 - 99999 {
+        return fail_pair(status_malformed());
+    }
+    return PairOut {
+        status: status_ok(),
+        key: key,
+        key_len: found.klen,
+        kstart: found.kstart,
+        kind: kind_int(),
+        sval: zero64(),
+        sval_len: 0,
+        ival: value,
+        bval: false,
+        vstart: found.vstart,
+        vlen: found.vlen
+    };
+}
+
+record IntSt {
+    value: i64,
+    digits: u64,
+    neg: bool,
+    bad: bool
+}
+
+fn int_step(st: IntSt, current: byte, i: u64, vstart: u64, live: bool) -> (result: IntSt) {
+    if !(live) {
+        return st;
+    }
+    if i == vstart && current == (45) as byte {
+        if st.digits > 0 {
+            return IntSt { ..st, bad: true };
+        }
+        return IntSt { ..st, neg: true };
+    }
+    if !(is_digit(current)) {
+        return IntSt { ..st, bad: true };
+    }
+    return IntSt {
+        ..st,
+        value: st.value *% 10 +% ((current as i64) - 48),
+        digits: st.digits +% 1
+    };
+}

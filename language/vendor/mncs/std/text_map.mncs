@@ -1,0 +1,48 @@
+mncs 0.10;
+
+// mncs.std.text_map.v1 — bounded text-to-code tables.
+//
+// Maps open-vocabulary byte spellings to closed discriminants with total,
+// deterministic, allocation-free lookup. Tables are caller-owned data; this
+// module owns only the bounded search, composed from text_view matchers and
+// the sequences iteration idiom. No table is authoritative: the caller
+// decides the vocabulary, the codes, and the fallback.
+//
+// Duplicate keys resolve to the LAST entry, deterministically. Callers that
+// need uniqueness enforce it where the table is built (a host-side,
+// inspectable decision), never inside the lookup.
+module mncs.std.text_map.v1;
+
+use mncs.std.text_view.v1 as text;
+
+record Coded16 { key: [byte; 16], key_length: u64, code: i64 }
+
+record Coded32 { key: [byte; 32], key_length: u64, code: i64 }
+
+fn lookup16<K: Nat>(table: [Coded16; K], key: [byte; 16], key_length: u64, fallback: i64) -> (result: i64) {
+    iterate i over table carrying found: i64 = fallback {
+        let entry: Coded16 = table[i];
+        let hit: bool = text.matches16(key, key_length, entry.key, entry.key_length);
+        next found = select(hit, entry.code, found);
+    }
+    return found;
+}
+
+fn lookup32<K: Nat>(table: [Coded32; K], key: [byte; 32], key_length: u64, fallback: i64) -> (result: i64) {
+    iterate i over table carrying found: i64 = fallback {
+        let entry: Coded32 = table[i];
+        let hit: bool = text.matches32(key, key_length, entry.key, entry.key_length);
+        next found = select(hit, entry.code, found);
+    }
+    return found;
+}
+
+// Executable entry points with concrete table shapes for backend corpora.
+
+fn candidate_lookup16(table: [Coded16; 3], key: [byte; 16], key_length: u64, fallback: i64) -> (result: i64) {
+    return lookup16<3>(table, key, key_length, fallback);
+}
+
+fn candidate_lookup32(table: [Coded32; 2], key: [byte; 32], key_length: u64, fallback: i64) -> (result: i64) {
+    return lookup32<2>(table, key, key_length, fallback);
+}

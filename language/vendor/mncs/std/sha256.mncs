@@ -1,0 +1,230 @@
+mncs 0.13;
+
+// mncs.std.sha256 — SHA-256 as pure bounded MNCS (index PRESS-006).
+//
+// The downstream dual-hash workaround exists because canonical content
+// hashing needed grant-gated experiment calls with per-call compile
+// cost. This module removes the semantic need: SHA-256 compression,
+// multi-block update, and padding/finalization are total bounded
+// functions over u32 arithmetic (rotr/shr/xor/add live in the language
+// since the PRESS-004 bitwise resolution), so every backend realizes
+// them with no grant, no capability, and no new trusted primitive. A
+// hash is pure computation; authority was never semantically necessary,
+// and none is taken.
+//
+// Streaming design: `DigestState` carries the running hash, the total
+// length, and at most 63 buffered bytes. `update` absorbs one
+// ≤64-byte view (compressing at most one block: buffered + chunk holds
+// at most 127 bytes), and `finalize` appends 0x80, zeros, and the
+// 64-bit big-endian bit length across one or two blocks. Different
+// chunkings of one input converge to one digest by construction: only
+// the byte sequence and total length participate in meaning.
+//
+// Bounds: one `compress` is 64 schedule words plus 64 rounds (all
+// straight-line folds, ~10k steps); `update` costs at most one
+// compress; `finalize` at most two. No operation allocates.
+module mncs.std.sha256.v1;
+
+use mncs.std.encoding.v1 as encoding;
+
+// --- Bitwise primitives (u32) ---
+
+fn rotr(x: u32, n: u64) -> (result: u32) {
+    return (x >> n) | (x << (32 - n));
+}
+
+fn not32(x: u32) -> (result: u32) {
+    return x ^ 4294967295;
+}
+
+fn ch(e: u32, f: u32, g: u32) -> (result: u32) {
+    return (e & f) ^ (not32(e) & g);
+}
+
+fn maj(a: u32, b: u32, c: u32) -> (result: u32) {
+    return (a & b) ^ (a & c) ^ (b & c);
+}
+
+fn big_sigma0(a: u32) -> (result: u32) {
+    return rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+}
+
+fn big_sigma1(e: u32) -> (result: u32) {
+    return rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+}
+
+fn small_sigma0(w: u32) -> (result: u32) {
+    return rotr(w, 7) ^ rotr(w, 18) ^ (w >> 3);
+}
+
+fn small_sigma1(w: u32) -> (result: u32) {
+    return rotr(w, 17) ^ rotr(w, 19) ^ (w >> 10);
+}
+
+// Four big-endian bytes at `at` form one word. Indices clamp into the
+// block so the projection is total; callers only invoke it with
+// `at + 3 < 64`.
+fn word_at(block: [byte; 64], at: u64) -> (result: u32) {
+    let base: u64 = select(at <= 60, at, 0);
+    return encoding.decode_u32([block[base], block[base +% 1], block[base +% 2], block[base +% 3]]);
+}
+
+// --- Message schedule: W[t] for t in 0..64, folded over the round
+// constant domain (which conveniently also counts 0..64). ---
+
+fn schedule(block: [byte; 64], k: [u32; 64]) -> (result: [u32; 64]) {
+    let seed: [u32; 64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    iterate t over k carrying w: [u32; 64] = seed {
+        let early: bool = t < 16;
+        let fresh: u32 = word_at(block, t *% 4);
+        let extended: u32 = small_sigma1(w[select(t >= 2, t -% 2, 0)]) +% w[select(t >= 7, t -% 7, 0)] +% small_sigma0(w[select(t >= 15, t -% 15, 0)]) +% w[select(t >= 16, t -% 16, 0)];
+        next w = replace(w, t, select(early, fresh, extended));
+    }
+    return w;
+}
+
+// --- Compression: 64 rounds over eight working words. ---
+
+record State { a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32 }
+
+fn rounds(st: State, w: [u32; 64], k: [u32; 64]) -> (result: State) {
+    iterate t over k carrying s: State = st {
+        let t1: u32 = s.h +% big_sigma1(s.e) +% ch(s.e, s.f, s.g) +% k[t] +% w[t];
+        let t2: u32 = big_sigma0(s.a) +% maj(s.a, s.b, s.c);
+        next s = State {
+            a: t1 +% t2,
+            b: s.a,
+            c: s.b,
+            d: s.c,
+            e: s.d +% t1,
+            f: s.e,
+            g: s.f,
+            h: s.g
+        };
+    }
+    return s;
+}
+
+fn compress(h: [u32; 8], block: [byte; 64], k: [u32; 64]) -> (result: [u32; 8]) {
+    let w: [u32; 64] = schedule(block, k);
+    let init: State = State { a: h[0], b: h[1], c: h[2], d: h[3], e: h[4], f: h[5], g: h[6], h: h[7] };
+    let done: State = rounds(init, w, k);
+    return [h[0] +% done.a, h[1] +% done.b, h[2] +% done.c, h[3] +% done.d, h[4] +% done.e, h[5] +% done.f, h[6] +% done.g, h[7] +% done.h];
+}
+
+// --- Streaming digest state. ---
+
+record DigestState { h: [u32; 8], total: u64, buf: [byte; 64], buffered: u64 }
+
+fn init() -> (result: DigestState) {
+    let empty: [byte; 64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    return DigestState {
+        h: [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225],
+        total: 0,
+        buf: empty,
+        buffered: 0
+    };
+}
+
+// Absorb one view. Buffered bytes plus the chunk hold at most 127
+// bytes, so at most one block compresses; the rest (at most 63 bytes)
+// carries forward. Trailing storage past `buffered` is always zero.
+fn update(st: DigestState, chunk: [byte; up_to 64], chunk_length: u64, k: [u32; 64]) -> (result: DigestState) {
+    let clen: u64 = select(chunk_length <= chunk.len, chunk_length, chunk.len);
+    let combined: u64 = st.buffered +% clen;
+    let full: bool = combined >= 64;
+    let seed_block: [byte; 64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    iterate j over seed_block carrying block0: [byte; 64] = seed_block {
+        let from_buf: bool = j < st.buffered;
+        let bi: u64 = select(from_buf, j, j -% st.buffered);
+        // Views are runtime-length exact: clamp the chunk projection
+        // into its runtime length. Positions past the combined length
+        // are discarded by the outer select, so the clamp value is
+        // never observed.
+        let ci: u64 = select(bi < chunk.len, bi, 0);
+        next block0 = replace(block0, j, select(from_buf, st.buf[bi], chunk[ci]));
+    }
+    let consumed: u64 = select(full, 64, 0);
+    let carried: u64 = combined -% consumed;
+    let seed_buf: [byte; 64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    iterate m over seed_buf carrying kept: [byte; 64] = seed_buf {
+        let si: u64 = consumed +% m;
+        let take: bool = si < combined;
+        let from_old: bool = si < st.buffered;
+        let ri: u64 = select(from_old, si, si -% st.buffered);
+        // Same runtime-length clamp as above: `take` discards anything
+        // past the combined length, so the clamp is never observed.
+        let ci: u64 = select(ri < chunk.len && ri < 64, ri, 0);
+        let oi: u64 = select(ri < 64, ri, 0);
+        let byte: byte = select(from_old, st.buf[oi], chunk[ci]);
+        next kept = replace(kept, m, select(take, byte, 0));
+    }
+    let total: u64 = st.total +% clen;
+    if full {
+        let h1: [u32; 8] = compress(st.h, block0, k);
+        return DigestState { h: h1, total: total, buf: kept, buffered: carried };
+    } else {
+    }
+    return DigestState { h: st.h, total: total, buf: kept, buffered: carried };
+}
+
+// Length bytes: the 64-bit big-endian bit length, byte `li` of 0..8.
+fn length_byte(total: u64, li: u64) -> (result: byte) {
+    let powers: [u64; 8] = [72057594037927936, 281474976710656, 1099511627776, 4294967296, 16777216, 65536, 256, 1];
+    let bits: u64 = total *% 8;
+    return ((bits / powers[select(li < 8, li, 0)]) % 256) as byte;
+}
+
+// Pad and finish: 0x80, zeros, and the bit length across one block
+// (buffered <= 55) or two. Returns the 32 digest bytes big-endian.
+fn finalize(st: DigestState, k: [u32; 64]) -> (result: [byte; 32]) {
+    let one_block: bool = st.buffered <= 55;
+    let seed_stage: [byte; 128] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    iterate j over seed_stage carrying stage: [byte; 128] = seed_stage {
+        let in_message: bool = j < st.buffered;
+        let is_pad: bool = j == st.buffered;
+        let base: byte = select(in_message, st.buf[select(in_message, j, 0)], select(is_pad, 128, 0));
+        // Length positions: 56..64 of a single block, else 120..128.
+        let li: u64 = select(one_block, select(j >= 56 && j < 64, j -% 56, 8), select(j >= 120, j -% 120, 8));
+        next stage = replace(stage, j, select(li < 8, length_byte(st.total, li), base));
+    }
+    let first: [byte; 64] = [stage[0], stage[1], stage[2], stage[3], stage[4], stage[5], stage[6], stage[7], stage[8], stage[9], stage[10], stage[11], stage[12], stage[13], stage[14], stage[15], stage[16], stage[17], stage[18], stage[19], stage[20], stage[21], stage[22], stage[23], stage[24], stage[25], stage[26], stage[27], stage[28], stage[29], stage[30], stage[31], stage[32], stage[33], stage[34], stage[35], stage[36], stage[37], stage[38], stage[39], stage[40], stage[41], stage[42], stage[43], stage[44], stage[45], stage[46], stage[47], stage[48], stage[49], stage[50], stage[51], stage[52], stage[53], stage[54], stage[55], stage[56], stage[57], stage[58], stage[59], stage[60], stage[61], stage[62], stage[63]];
+    let h1: [u32; 8] = compress(st.h, first, k);
+    if one_block {
+        return state_to_bytes(h1);
+    } else {
+    }
+    let second: [byte; 64] = [stage[64], stage[65], stage[66], stage[67], stage[68], stage[69], stage[70], stage[71], stage[72], stage[73], stage[74], stage[75], stage[76], stage[77], stage[78], stage[79], stage[80], stage[81], stage[82], stage[83], stage[84], stage[85], stage[86], stage[87], stage[88], stage[89], stage[90], stage[91], stage[92], stage[93], stage[94], stage[95], stage[96], stage[97], stage[98], stage[99], stage[100], stage[101], stage[102], stage[103], stage[104], stage[105], stage[106], stage[107], stage[108], stage[109], stage[110], stage[111], stage[112], stage[113], stage[114], stage[115], stage[116], stage[117], stage[118], stage[119], stage[120], stage[121], stage[122], stage[123], stage[124], stage[125], stage[126], stage[127]];
+    let h2: [u32; 8] = compress(h1, second, k);
+    return state_to_bytes(h2);
+}
+
+// Eight words to 32 big-endian bytes.
+fn state_to_bytes(h: [u32; 8]) -> (result: [byte; 32]) {
+    let seed: [byte; 32] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    iterate i over seed carrying acc: [byte; 32] = seed {
+        let word: u32 = h[i / 4];
+        let quad: [byte; 4] = encoding.encode_u32(word);
+        next acc = replace(acc, i, quad[i % 4]);
+    }
+    return acc;
+}
+
+// --- Executable entry points ---
+
+// SHA-256("abc") through init/update/finalize.
+fn candidate_sha256_abc(chunk: [byte; up_to 64], chunk_length: u64, k: [u32; 64]) -> (result: [byte; 32]) {
+    let s0: DigestState = init();
+    let s1: DigestState = update(s0, chunk, chunk_length, k);
+    return finalize(s1, k);
+}
+
+// SHA-256 over three chunks (64 + 64 + remainder): the multi-block
+// acceptance shape for inputs past the old 64-byte wall.
+fn candidate_sha256_blocks(a: [byte; up_to 64], la: u64, b: [byte; up_to 64], lb: u64, c: [byte; up_to 64], lc: u64, k: [u32; 64]) -> (result: [byte; 32]) {
+    let s0: DigestState = init();
+    let s1: DigestState = update(s0, a, la, k);
+    let s2: DigestState = update(s1, b, lb, k);
+    let s3: DigestState = update(s2, c, lc, k);
+    return finalize(s3, k);
+}

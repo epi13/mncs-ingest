@@ -1,0 +1,221 @@
+mncs 0.10;
+
+// mncs.std.text_scan — bounded literal text scanning over byte views.
+//
+// Machine-native text is explicitly bounded byte views, not heap strings:
+// hosts encode text as `[byte; up_to 64]` values (the executor ABI carries
+// byte sequences directly) and this module decides over them with total,
+// allocation-free operations. There is deliberately no regex engine here:
+// the harness routing surfaces that motivated this module (literal-term
+// detection, code-fence detection, file-like token detection, bounded
+// word/token scanning) are all deterministic bounded scans.
+//
+// UTF-8 policy: operations are byte-oriented and never assume scalar
+// boundaries. Validity is producer-attested (`TextView.utf8_valid`), not
+// re-derived. ASCII-class decisions (`count_words`) reuse the byte-domain
+// predicates from `mncs.core.bytes.v1`, never restated code points.
+//
+// Complexity bounds (H, N <= 64 by MAX_SEQUENCE_BOUND):
+//   window_equal / starts_with / ends_with   <= N byte comparisons
+//   contains / find                          <= 64*N + 64 byte comparisons
+//   compare                                  <= max(N, M) byte comparisons
+//   count_byte / count_words                 <= 64 steps
+// No operation allocates; every function is total over its declared domain.
+// An empty needle matches at every position of a non-empty view
+// (contains/starts_with/ends_with are true, find returns 0); on an empty
+// view contains is false and find is -1, since there is no position to
+// match at.
+//
+// This module extends the RFC 0044 bounded-sequence-byte-view substrate
+// alongside `mncs.std.text_view.v1` (spans/flags, 16/32-byte key matching)
+// and `mncs.std.text_map.v1` (byte-spelling to code tables). Those keep
+// their shape; this module owns multi-byte literal needles over views.
+module mncs.std.text_scan.v1;
+
+use mncs.core.bytes.v1 as bytes;
+use mncs.core.logic.v1 as logic;
+
+// Window equality: the N-byte needle matches the haystack at `start`.
+// Guards keep the verdict inside both declared lengths, and every
+// projection is clamped into the view's runtime length, so the operation
+// is total even for overlong or misaligned inputs. The clamp matters
+// because selection is strict: both `select` candidates evaluate, so a
+// guarded-away projection would still trap on an out-of-bounds index.
+fn window_equal<N: Nat>(hay: [byte; up_to 64], hay_length: u64, start: u64, needle: [byte; N], needle_length: u64) -> (result: bool) {
+    if hay.len == 0 {
+        return needle_length == 0;
+    }
+    let hlen: u64 = select(hay_length <= hay.len, hay_length, hay.len);
+    let fits: bool = needle_length <= needle.len && start +% needle_length <= hlen;
+    iterate j over needle carrying same: bool = fits {
+        let k: u64 = start +% j;
+        let live: bool = j < needle_length && k < hlen;
+        let slot: u64 = select(k < hlen, k, 0);
+        next same = same && select(live, hay[slot] == needle[j], true);
+    }
+    return same;
+}
+
+// Literal-term detection: the needle occurs anywhere in the view.
+fn contains<N: Nat>(hay: [byte; up_to 64], hay_length: u64, needle: [byte; N], needle_length: u64) -> (result: bool) {
+    iterate i over hay carrying found: bool = false {
+        next found = found || window_equal<N>(hay, hay_length, i, needle, needle_length);
+    }
+    return found;
+}
+
+// Bounded prefix check.
+fn starts_with<N: Nat>(hay: [byte; up_to 64], hay_length: u64, needle: [byte; N], needle_length: u64) -> (result: bool) {
+    return window_equal<N>(hay, hay_length, 0, needle, needle_length);
+}
+
+// Bounded suffix check. The start is computed with wrapping subtraction,
+// but the `fits` guard inside `window_equal` keeps the result total: an
+// overlong needle simply cannot fit and reports false.
+fn ends_with<N: Nat>(hay: [byte; up_to 64], hay_length: u64, needle: [byte; N], needle_length: u64) -> (result: bool) {
+    let fits: bool = needle_length <= hay_length;
+    let start: u64 = hay_length -% needle_length;
+    return select(fits, window_equal<N>(hay, hay_length, start, needle, needle_length), false);
+}
+
+// Exact view equality over explicit lengths: true when both declared
+// lengths agree and every live byte matches. Total like `window_equal`:
+// lengths clamp into their declared bounds, and strict selection keeps
+// every projection inside the view's runtime length. This is the
+// variable-length token matcher: one entrypoint decides tokens of
+// differing runtime widths (3-byte `x86` and 7-byte `aarch64` alike)
+// through their explicit lengths, not through exact-width parameters.
+fn equals<N: Nat>(value: [byte; up_to 64], value_length: u64, target: [byte; N], target_length: u64) -> (result: bool) {
+    if value.len == 0 {
+        return target_length == 0;
+    }
+    let vlen: u64 = select(value_length <= value.len, value_length, value.len);
+    let valid: bool = vlen == target_length && target_length <= target.len;
+    iterate j over target carrying same: bool = valid {
+        let live: bool = j < target_length && j < vlen;
+        let slot: u64 = select(j < vlen, j, 0);
+        next same = same && select(live, value[slot] == target[j], true);
+    }
+    return same;
+}
+
+// ASCII case-insensitive exact match: the `equals` shape with bytes
+// compared through `bytes.eq_ascii_fold`. Locale-free by construction:
+// only the 26 ASCII pairs fold, every other byte must match exactly.
+fn equals_folded<N: Nat>(value: [byte; up_to 64], value_length: u64, target: [byte; N], target_length: u64) -> (result: bool) {
+    if value.len == 0 {
+        return target_length == 0;
+    }
+    let vlen: u64 = select(value_length <= value.len, value_length, value.len);
+    let valid: bool = vlen == target_length && target_length <= target.len;
+    iterate j over target carrying same: bool = valid {
+        let live: bool = j < target_length && j < vlen;
+        let slot: u64 = select(j < vlen, j, 0);
+        next same = same && select(live, bytes.eq_ascii_fold(value[slot], target[j]), true);
+    }
+    return same;
+}
+
+// First occurrence index as i64, or -1 when the needle is absent. The
+// sentinel stays inside the i64 vocabulary; -1 can never be a valid index.
+fn find<N: Nat>(hay: [byte; up_to 64], hay_length: u64, needle: [byte; N], needle_length: u64) -> (result: i64) {
+    iterate i over hay carrying found: i64 = 0 - 1 {
+        let hit: bool = window_equal<N>(hay, hay_length, i, needle, needle_length);
+        next found = select(found == 0 - 1 && hit, i as i64, found);
+    }
+    return found;
+}
+
+// Deterministic byte-lexicographic ordering over explicit lengths: -1 when
+// the left view sorts first, 1 when it sorts last, 0 when equal. Lengths
+// are clamped to their declared bounds, then decide ties after the common
+// prefix compares equal. No locale, no case folding, no Unicode collation.
+record Cmp { ord: i64, decided: bool }
+
+fn compare<N: Nat, M: Nat>(left: [byte; N], left_length: u64, right: [byte; M], right_length: u64) -> (result: i64) {
+    let llen: u64 = select(left_length <= left.len, left_length, left.len);
+    let rlen: u64 = select(right_length <= right.len, right_length, right.len);
+    let tie: i64 = select(llen == rlen, 0, select(llen <= rlen, 0 - 1, 1));
+    if right.len == 0 {
+        return tie;
+    }
+    let seed: Cmp = Cmp { ord: 0, decided: false };
+    iterate i over left carrying st: Cmp = seed {
+        let live: bool = i < llen && i < rlen;
+        // Strict selection evaluates both candidates, so the right-hand
+        // projection is clamped into range even where `live` is false.
+        let slot: u64 = select(i < rlen, i, 0);
+        let diff: bool = left[i] != right[slot];
+        let less: bool = left[i] <= right[slot];
+        next st = Cmp {
+            ord: select(logic.bool_not(st.decided) && live && diff, select(less, 0 - 1, 1), st.ord),
+            decided: st.decided || (live && diff)
+        };
+    }
+    return select(st.decided, st.ord, tie);
+}
+
+// Count occurrences of one byte in the view window.
+fn count_byte(hay: [byte; up_to 64], hay_length: u64, target: byte) -> (result: u64) {
+    iterate i over hay carrying hits: u64 = 0 {
+        let live: bool = i < hay_length;
+        next hits = hits +% select(live && hay[i] == target, 1, 0);
+    }
+    return hits;
+}
+
+// Bounded word scan: maximal runs of non-ASCII-space bytes. Word
+// boundaries reuse the byte-domain classifier, so tokenization policy is
+// one shared predicate, not per-callsite folklore.
+record WordScan { count: u64, in_word: bool }
+
+fn count_words(hay: [byte; up_to 64], hay_length: u64) -> (result: u64) {
+    let seed: WordScan = WordScan { count: 0, in_word: false };
+    iterate i over hay carrying st: WordScan = seed {
+        let live: bool = i < hay_length;
+        let word_byte: bool = live && logic.bool_not(bytes.is_ascii_space(hay[i]));
+        next st = WordScan {
+            count: st.count +% select(logic.bool_not(st.in_word) && word_byte, 1, 0),
+            in_word: word_byte
+        };
+    }
+    return st.count;
+}
+
+// Executable entry points with concrete shapes for backend corpora.
+
+fn candidate_contains(hay: [byte; up_to 64], hay_length: u64, needle: [byte; 4], needle_length: u64) -> (result: bool) {
+    return contains<4>(hay, hay_length, needle, needle_length);
+}
+
+fn candidate_starts_with(hay: [byte; up_to 64], hay_length: u64, needle: [byte; 4], needle_length: u64) -> (result: bool) {
+    return starts_with<4>(hay, hay_length, needle, needle_length);
+}
+
+fn candidate_ends_with(hay: [byte; up_to 64], hay_length: u64, needle: [byte; 4], needle_length: u64) -> (result: bool) {
+    return ends_with<4>(hay, hay_length, needle, needle_length);
+}
+
+fn candidate_find(hay: [byte; up_to 64], hay_length: u64, needle: [byte; 4], needle_length: u64) -> (result: i64) {
+    return find<4>(hay, hay_length, needle, needle_length);
+}
+
+fn candidate_compare(left: [byte; 8], left_length: u64, right: [byte; 8], right_length: u64) -> (result: i64) {
+    return compare<8, 8>(left, left_length, right, right_length);
+}
+
+fn candidate_count_byte(hay: [byte; up_to 64], hay_length: u64, target: byte) -> (result: u64) {
+    return count_byte(hay, hay_length, target);
+}
+
+fn candidate_count_words(hay: [byte; up_to 64], hay_length: u64) -> (result: u64) {
+    return count_words(hay, hay_length);
+}
+
+fn candidate_equals(value: [byte; up_to 64], value_length: u64, target: [byte; 4], target_length: u64) -> (result: bool) {
+    return equals<4>(value, value_length, target, target_length);
+}
+
+fn candidate_equals_folded(value: [byte; up_to 64], value_length: u64, target: [byte; 4], target_length: u64) -> (result: bool) {
+    return equals_folded<4>(value, value_length, target, target_length);
+}

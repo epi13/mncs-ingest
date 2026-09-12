@@ -1,0 +1,108 @@
+mncs 0.10;
+
+// mncs.std.chunk — bounded chunk cursors with cross-chunk span identities.
+//
+// Large inputs arrive as a sequence of ≤64-byte views (one filesystem
+// chunk, one grant, one view per call). This module owns the cursor and
+// span vocabulary that keeps meaning across chunk boundaries without a
+// heap String: a Span names (chunk, start, length), cursors advance by
+// explicit offsets, and line-boundary scans are total bounded folds.
+//
+// The 64-byte seams are the contract, not an accident: `find_newline`
+// scans one view, `carry_scan` resumes a scan in the next chunk from an
+// explicit carry offset, and `span_length_across` measures a line that
+// starts in one chunk and ends in another. Hosts feed chunks in order;
+// the language decides boundaries, spans, and slices.
+module mncs.std.chunk.v1;
+
+use mncs.core.logic.v1 as logic;
+
+// A span of bytes starting at `start` in chunk `chunk`, `length` bytes
+// long. Spans never dangle: producers construct them from scanned
+// boundaries, and consumers clamp them into the view they read.
+record Span { chunk: u64, start: u64, length: u64 }
+
+// A read cursor: the next unread position. `chunk` selects the view,
+// `offset` the position inside it.
+record Cursor { chunk: u64, offset: u64 }
+
+// Index of the first `\n` at or after `from` in the view's live window,
+// or -1 when the window holds no newline. Total: overlong `from` simply
+// matches nothing.
+fn find_newline(view: [byte; up_to 64], view_length: u64, from: u64) -> (result: i64) {
+    let vlen: u64 = select(view_length <= view.len, view_length, view.len);
+    iterate i over view carrying found: i64 = 0 - 1 {
+        let live: bool = i < vlen && i >= from;
+        let hit: bool = live && view[i] == 10;
+        next found = select(found == 0 - 1 && hit, i as i64, found);
+    }
+    return found;
+}
+
+// Length of the line starting at `from`, excluding the newline: the
+// newline index minus `from`, or the rest of the window when no newline
+// follows. Callers detect an unterminated tail (the line may continue in
+// the next chunk) by comparing `from + length` against the view length.
+fn line_length(view: [byte; up_to 64], view_length: u64, from: u64) -> (result: u64) {
+    let vlen: u64 = select(view_length <= view.len, view_length, view.len);
+    let start: u64 = select(from <= vlen, from, vlen);
+    let end: i64 = find_newline(view, view_length, start);
+    return select(end == 0 - 1, vlen -% start, (end as u64) -% start);
+}
+
+// Advance a cursor past one line: the span of the line content plus the
+// cursor at the next line start (past the newline when one was found).
+record LineStep { span: Span, after: Cursor, terminated: bool }
+
+fn next_line(view: [byte; up_to 64], view_length: u64, cursor: Cursor) -> (result: LineStep) {
+    let vlen: u64 = select(view_length <= view.len, view_length, view.len);
+    let start: u64 = select(cursor.offset <= vlen, cursor.offset, vlen);
+    let length: u64 = line_length(view, view_length, start);
+    let end: u64 = start +% length;
+    let terminated: bool = end < vlen;
+    let after: u64 = select(terminated, end +% 1, end);
+    return LineStep {
+        span: Span { chunk: cursor.chunk, start: start, length: length },
+        after: Cursor { chunk: cursor.chunk, offset: after },
+        terminated: terminated
+    };
+}
+
+// Measure a line that starts in an earlier chunk: `prefix_length` bytes
+// were already observed (the unterminated tail), and this view holds the
+// rest up to its first newline (or the whole view when unterminated).
+// Returns the total line length across both chunks plus whether this
+// chunk terminated it.
+record JoinedLine { total_length: u64, terminated: bool }
+
+fn continue_line(view: [byte; up_to 64], view_length: u64, prefix_length: u64) -> (result: JoinedLine) {
+    let end: i64 = find_newline(view, view_length, 0);
+    let terminated: bool = logic.bool_not(end == 0 - 1);
+    let tail: u64 = select(terminated, end as u64, select(view_length <= view.len, view_length, view.len));
+    return JoinedLine { total_length: prefix_length +% tail, terminated: terminated };
+}
+
+// --- Executable entry points (scalar shapes for backend corpora) ---
+
+// Newline scan: "ab\ncd" holds its newline at index 2; scanning from 3
+// finds none. Packs to 2 * 10 + 1 (found-flag) = 21... precisely:
+// first * 100 + (second == -1) packs 200 + 1 = 201.
+fn candidate_find_newline(view: [byte; up_to 64], view_length: u64) -> (result: i64) {
+    let first: i64 = find_newline(view, view_length, 0);
+    let second: i64 = find_newline(view, view_length, 3);
+    return first * 100 + select(second == 0 - 1, 1, 0);
+}
+
+// Single-chunk line step: "ab\ncd" from 0 spans (0, 2), terminates, and
+// resumes at 3. Packs start * 10000 + length * 1000 + next * 10 + term.
+fn candidate_next_line(view: [byte; up_to 64], view_length: u64) -> (result: i64) {
+    let step: LineStep = next_line(view, view_length, Cursor { chunk: 0, offset: 0 });
+    return step.span.start as i64 * 10000 + step.span.length as i64 * 1000 + step.after.offset as i64 * 10 + select(step.terminated, 1, 0);
+}
+
+// Cross-chunk line: a 60-byte prefix continues into "ef\n..."; the
+// joined length is 62 and the line terminates here. Packs 62 * 10 + 1.
+fn candidate_continue_line(view: [byte; up_to 64], view_length: u64, prefix_length: u64) -> (result: i64) {
+    let joined: JoinedLine = continue_line(view, view_length, prefix_length);
+    return joined.total_length as i64 * 10 + select(joined.terminated, 1, 0);
+}

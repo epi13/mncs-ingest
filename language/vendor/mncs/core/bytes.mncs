@@ -1,0 +1,143 @@
+mncs 0.7;
+
+// mncs.core.bytes — byte-oriented primitives for fingerprints and encodings.
+//
+// Bytes are 8-bit unsigned byte-oriented logical values, deliberately
+// distinct from integers: crossing between them requires an explicit `as`
+// conversion whose direction is visible at the call site. Bitwise operations,
+// shifts, and comparisons here are total by definition; no operation in this
+// module can fail or leave an unresolved obligation.
+//
+// Shift semantics are fixed language-wide: the count is taken modulo 8 and
+// both shifts are logical, because bytes are unsigned by construction.
+//
+// Realization envelope (2026-08): reference executors, research bytecode,
+// portable WASM, C11, LLVM IR, and Cranelift realize every operation in this
+// module with exact bounded agreement over examples/execution/
+// profile07-bounded-data-corpus.json.
+module mncs.core.bytes.v1;
+
+record Pair { left: byte, right: byte }
+
+// Bitwise combinators; total.
+fn xor(left: byte, right: byte) -> (result: byte) {
+    return left ^ right;
+}
+
+fn mask(left: byte, right: byte) -> (result: byte) {
+    return left & right;
+}
+
+fn join(left: byte, right: byte) -> (result: byte) {
+    return left | right;
+}
+
+// Logical shifts with counts taken modulo 8.
+fn shift_left(value: byte, count: u64) -> (result: byte) {
+    return value << count;
+}
+
+fn shift_right(value: byte, count: u64) -> (result: byte) {
+    return value >> count;
+}
+
+// Unsigned byte ordering; the canonical comparison vocabulary for encoded
+// data.
+fn order(left: byte, right: byte) -> (result: bool) {
+    return left <= right;
+}
+
+// Mix one byte into an accumulator with a fixed odd multiplier. The
+// multiplication wraps in the declared u64 width by explicit intent, so the
+// fold is total and reproducible across realizations.
+fn fold_byte(acc: u64, value: byte) -> (result: u64) {
+    return (acc + (value as u64)) *% 31;
+}
+
+// Fold four bytes into a 64-bit fingerprint. Byte order is big-endian by
+// definition so fingerprints agree across hosts without endianness folklore.
+fn fingerprint4(data: [byte; 4]) -> (result: u64) {
+    let step0: u64 = fold_byte(0, data[0]);
+    let step1: u64 = fold_byte(step0, data[1]);
+    let step2: u64 = fold_byte(step1, data[2]);
+    return fold_byte(step2, data[3]);
+}
+
+// Split a byte into its two 4-bit nibbles; the smallest demonstration that
+// logical decomposition of encoded data stays on the byte substrate.
+fn nibbles(value: byte) -> (result: Pair) {
+    let high: byte = value >> 4;
+    let low: byte = value & 15;
+    return Pair { left: high, right: low };
+}
+
+// ASCII classifiers. These are byte-domain predicates, not text types.
+// Parsers import them instead of restating 48..57 locally.
+fn is_digit(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n >= 48 && n <= 57;
+}
+
+fn is_ascii_alpha(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    let lower: bool = n >= 97 && n <= 122;
+    let upper: bool = n >= 65 && n <= 90;
+    return lower || upper;
+}
+
+fn is_ascii_space(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    let control: bool = (n >= 9) && (n <= 13);
+    return (n == 32) || control;
+}
+
+fn digit_value(value: byte) -> (result: i64) {
+    return (value as i64) - 48;
+}
+
+// ASCII case predicates. Byte-domain classifiers like `is_digit`: the 26
+// pairs only, no locale, no Unicode.
+fn is_ascii_upper(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n >= 65 && n <= 90;
+}
+
+fn is_ascii_lower(value: byte) -> (result: bool) {
+    let n: i64 = value as i64;
+    return n >= 97 && n <= 122;
+}
+
+// ASCII case folding. Total: A-Z map to a-z (and a-z to A-Z); every other
+// byte is returned unchanged. Folding is the 26 ASCII pairs only, so
+// classifiers built on it stay byte-exact across realizations. The guarded
+// ranges keep the `as byte` conversions inside 0..=255 on every path.
+fn to_ascii_lower(value: byte) -> (result: byte) {
+    let n: i64 = value as i64;
+    if is_ascii_upper(value) {
+        return (n + 32) as byte;
+    }
+    return value;
+}
+
+fn to_ascii_upper(value: byte) -> (result: byte) {
+    let n: i64 = value as i64;
+    if is_ascii_lower(value) {
+        return (n - 32) as byte;
+    }
+    return value;
+}
+
+// Case-insensitive byte equality over the ASCII pairs: 'A' equals 'a' and
+// every other byte equals only itself.
+fn eq_ascii_fold(left: byte, right: byte) -> (result: bool) {
+    return to_ascii_lower(left) == to_ascii_lower(right);
+}
+
+// Wrapping additive checksum. Deterministic and total; not a cryptographic
+// hash and not a claim of collision resistance.
+fn checksum4(data: [byte; 4]) -> (result: byte) {
+    let s0: i64 = (data[0] as i64) +% (data[1] as i64);
+    let s1: i64 = s0 +% (data[2] as i64);
+    let s2: i64 = s1 +% (data[3] as i64);
+    return (s2 % 256) as byte;
+}
