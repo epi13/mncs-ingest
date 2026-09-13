@@ -1,0 +1,12 @@
+{
+  "schema_version": "mncs-family.repository-manifest/v0alpha1",
+  "repository": "mncs-ingest",
+  "revision": 1,
+  "manifest_location": "in-repository",
+  "authority": {"note": "Ingest owns external-to-semantic normalization; retention and reasoning remain downstream."},
+  "contracts": {
+    "provides": [{"contract": "semantic-ir", "version": "1", "kind": "record-schema", "stability": "experimental", "fingerprint_sources": ["src/ir.rs", "src/canonical.rs"]}],
+    "consumes": [{"contract": "mncs-language.source-profile", "envelope": {"op": "compatible-minor", "version": "0.16"}, "required": true, "evidence_refs": ["src/language.rs"]}],
+    "tests": [{"test": "ingest-tests", "covers": ["semantic-ir"], "obligation": "self", "command": {"argv": ["cargo", "test"]}}]
+  }
+}
