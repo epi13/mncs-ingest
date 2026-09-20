@@ -1,0 +1,12 @@
+{
+  "schema_version": "commons.mncs.family-verification-checks/v1",
+  "repository_id": "mncs-ingest",
+  "checks": [
+    {
+      "identity": "mncs-ingest:pressure-registry-input",
+      "contract_identity": "mncs.pressure-registry/1",
+      "runner": "declaration",
+      "surface": "external-pressure-to-normalization"
+    }
+  ]
+}

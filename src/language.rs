@@ -179,6 +179,101 @@ impl LanguageRuntime {
         )
     }
 
+    /// Native canonicalization verdict: 0 known, 2 explicit unknown,
+    /// 3 unsupported code. The host may render a known code for a human
+    /// projection, but it no longer decides whether the code is known.
+    pub fn object_status(&self, object_code: i64) -> Result<i64, IngestError> {
+        self.call_i64("ingest_object_status", vec![i64_value(object_code)])
+    }
+
+    /// Native adapter compatibility/equivalence for code-bound spellings.
+    pub fn object_spelling_matches(
+        &self,
+        spelling: &[u8],
+        object_code: i64,
+    ) -> Result<bool, IngestError> {
+        Ok(self.call_i64(
+            "ingest_object_spelling_matches",
+            vec![
+                bytes_value(spelling),
+                u64_value(spelling.len() as u64),
+                i64_value(object_code),
+            ],
+        )? == 1)
+    }
+
+    /// Native completeness classification used by adapters before they
+    /// assemble the Rust transport carrier.
+    pub fn canonical_status(
+        &self,
+        object_code: i64,
+        quantity_present: bool,
+    ) -> Result<i64, IngestError> {
+        self.call_i64(
+            "ingest_canonical_status",
+            vec![i64_value(object_code), bool_value(quantity_present)],
+        )
+    }
+
+    /// Encode the typed Ingest -> Store handoff without an intermediate JSON
+    /// object. Identity bytes are supplied by the caller because source
+    /// identity and producer identity are provenance facts, not lifecycle
+    /// policy owned by this module.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_handoff(
+        &self,
+        semantic_type: u64,
+        source_kind: u64,
+        completeness: u64,
+        lossiness: u64,
+        source_identity: &[u8],
+        semantic_identity: &[u8],
+        producer_identity: &[u8],
+        transformation_identity: &[u8],
+    ) -> Result<Vec<u8>, IngestError> {
+        for (name, value) in [
+            ("source_identity", source_identity),
+            ("semantic_identity", semantic_identity),
+            ("producer_identity", producer_identity),
+            ("transformation_identity", transformation_identity),
+        ] {
+            if value.len() != 32 {
+                return Err(IngestError::Language(format!(
+                    "{name} must be exactly 32 bytes"
+                )));
+            }
+        }
+        let values = self.call(
+            "ingest_handoff_encode",
+            vec![
+                u64_value(semantic_type),
+                u64_value(source_kind),
+                u64_value(completeness),
+                u64_value(lossiness),
+                bytes_value(source_identity),
+                bytes_value(semantic_identity),
+                bytes_value(producer_identity),
+                bytes_value(transformation_identity),
+            ],
+        )?;
+        match values.first() {
+            Some(ExecutionValue::Sequence { values }) => values
+                .iter()
+                .map(|value| match value {
+                    ExecutionValue::Byte { value } => u8::try_from(*value).map_err(|_| {
+                        IngestError::Language("handoff returned a non-byte value".to_owned())
+                    }),
+                    other => Err(IngestError::Language(format!(
+                        "handoff returned a non-byte lane: {other:?}"
+                    ))),
+                })
+                .collect(),
+            other => Err(IngestError::Language(format!(
+                "expected byte sequence from ingest_handoff_encode, got {other:?}"
+            ))),
+        }
+    }
+
     pub fn validate(
         &self,
         event: i64,

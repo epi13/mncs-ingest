@@ -141,6 +141,30 @@ fn ordering_primitives_execute() {
 }
 
 #[test]
+fn typed_store_handoff_preserves_identity_and_limitation_state() {
+    let rt = rt();
+    assert_eq!(rt.object_status(1).unwrap(), 0);
+    assert_eq!(rt.object_status(0).unwrap(), 2);
+    assert!(rt.object_spelling_matches(b"apples", 1).unwrap());
+    assert!(!rt.object_spelling_matches(b"oranges", 1).unwrap());
+    assert_eq!(rt.canonical_status(1, true).unwrap(), 0);
+    assert_eq!(rt.canonical_status(0, true).unwrap(), 2);
+
+    let source = [1u8; 32];
+    let semantic = [2u8; 32];
+    let producer = [3u8; 32];
+    let transform = [4u8; 32];
+    let bytes = rt
+        .encode_handoff(1, 2, 2, 0, &source, &semantic, &producer, &transform)
+        .unwrap();
+    assert_eq!(bytes.len(), 164);
+    assert_eq!(&bytes[..4], b"IH\x01\0");
+    assert_eq!(&bytes[36..68], &source);
+    assert_eq!(&bytes[68..100], &semantic);
+    assert_eq!(&bytes[132..164], &transform);
+}
+
+#[test]
 fn backend_matrix_executes_on_real_backends() {
     let rt = rt();
     let observations = rt.backend_matrix().expect("backend matrix runs");

@@ -93,13 +93,21 @@ impl Adapter for TextAdapter {
             object_spelling: object_span.to_vec(),
             quantity,
         };
+        let object_status = rt.object_status(parse.object_code)?;
+        if object_status == 3 {
+            return Err(IngestError::unsupported(
+                ADAPTER,
+                "MNCS returned an unsupported object code",
+            ));
+        }
+        let canonical_status = rt.canonical_status(parse.object_code, parse.quantity_present)?;
         Ok(assemble(
             AdapterKind::Text,
             "mncs.ingest/ingest_parse",
             bytes,
             facts,
             spans,
-            parse.object_code == crate::ir::OBJECT_UNKNOWN,
+            canonical_status == 2,
         ))
     }
 }

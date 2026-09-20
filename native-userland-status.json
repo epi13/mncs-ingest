@@ -1,0 +1,22 @@
+{
+  "schema_version": "mncs.native-userland-status/1",
+  "repository_id": "mncs-ingest",
+  "status": "native_semantic_normalization_with_foreign_adapters",
+  "canonical_entrypoint": "LanguageRuntime facade plus adapter-owned transport parsing",
+  "native_sources": {
+    "bounded_transfer_parse": "language/mncs/ingest/parse.mncs",
+    "vocabulary_and_spelling_policy": "language/mncs/ingest/vocab.mncs",
+    "canonical_frame_validation": "language/mncs/ingest/frame.mncs",
+    "typed_store_handoff": "language/mncs/ingest/handoff.mncs"
+  },
+  "host_paths": [
+    {"path": "src/adapters/", "role": "external representation parsing and foreign adapter mechanics", "canonical": false},
+    {"path": "src/ir.rs", "role": "typed Rust transport carrier and compatibility serialization", "canonical": false},
+    {"path": "src/envelope.rs", "role": "external envelope and source identity boundary", "canonical": false}
+  ],
+  "native_shadow_slices": [
+    "Rust Fragment assembly remains a differential/reference carrier while typed handoff adoption expands",
+    "object_label remains a human projection spelling, not semantic classification"
+  ],
+  "next_migration_slice": "have the Commons pressure adapter emit the typed handoff directly and retain Rust JSON only at the external boundary"
+}

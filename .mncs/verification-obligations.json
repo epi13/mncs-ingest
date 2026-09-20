@@ -1,0 +1,31 @@
+{
+  "schema_version": "mncs-family.verification-obligation-inventory/v1",
+  "repository": "mncs-ingest",
+  "revision": 2,
+  "obligations": [
+    {
+      "identity": "mncs-ingest.canonicalization.native",
+      "title": "Known/unknown object and canonical completeness decisions execute in MNCS",
+      "guarantee_domain": "family_contract",
+      "evidence_role": "canonical_regression",
+      "lifecycle": "permanent",
+      "scope": "family",
+      "subjects": ["mncs.ingest.semantic-ir/1"],
+      "invalidation_dependencies": ["language/mncs/ingest/vocab.mncs", "language/mncs/ingest/handoff.mncs", "src/adapters/"],
+      "executor": {"provider": "mncs-ingest", "kind": "native_first_class_test", "entrypoint": "tests/mncs_authority.rs::typed_store_handoff_preserves_identity_and_limitation_state"},
+      "evidence_identity": {"subject_fields": ["semantic_identity"], "definition_fields": ["policy_identity"], "execution_fields": ["test_execution_identity"]}
+    },
+    {
+      "identity": "mncs-ingest.store-handoff.typed",
+      "title": "Ingest hands Store a typed provenance-bound record without JSON as the internal canonical form",
+      "guarantee_domain": "family_contract",
+      "evidence_role": "conformance",
+      "lifecycle": "permanent",
+      "scope": "consumer",
+      "subjects": ["mncs.ingest.typed-handoff/1", "mncs.store.persistent-state/1"],
+      "invalidation_dependencies": ["language/mncs/ingest/handoff.mncs", "src/language.rs"],
+      "executor": {"provider": "mncs-ingest", "kind": "native_first_class_test", "entrypoint": "tests/mncs_authority.rs::typed_store_handoff_preserves_identity_and_limitation_state"},
+      "evidence_identity": {"subject_fields": ["source_identity", "semantic_identity"], "definition_fields": ["handoff_representation_version"], "execution_fields": ["handoff_evidence_identity"]}
+    }
+  ]
+}

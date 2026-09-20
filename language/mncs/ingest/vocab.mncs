@@ -247,6 +247,16 @@ fn classify_object(text: [byte; up_to 64], start: u64, length: u64) -> (result: 
     return object_unknown();
 }
 
+// Native adapter compatibility is a semantic decision, not a host string
+// helper. Known codes accept their singular/plural spellings; unknown code
+// 0 accepts any bounded spelling and the host preserves it as data.
+fn object_spelling_matches(text: [byte; up_to 64], start: u64, length: u64, code: i64) -> (result: bool) {
+    if code == object_unknown() {
+        return length > 0 && length <= 16;
+    }
+    return classify_object(text, start, length) == code;
+}
+
 fn number_word_one() -> (result: [byte; 8]) {
     return [(111) as byte, (110) as byte, (101) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte, (0) as byte];
 }

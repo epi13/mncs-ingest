@@ -1,12 +1,15 @@
 {
   "schema_version": "mncs-family.repository-manifest/v0alpha1",
   "repository": "mncs-ingest",
-  "revision": 1,
+  "revision": 2,
   "manifest_location": "in-repository",
   "authority": {"note": "Ingest owns external-to-semantic normalization; retention and reasoning remain downstream."},
   "contracts": {
-    "provides": [{"contract": "semantic-ir", "version": "1", "kind": "record-schema", "stability": "experimental", "fingerprint_sources": ["src/ir.rs", "src/canonical.rs"]}],
-    "consumes": [{"contract": "mncs-language.source-profile", "envelope": {"op": "compatible-minor", "version": "0.16"}, "required": true, "evidence_refs": ["src/language.rs"]}],
-    "tests": [{"test": "ingest-tests", "covers": ["semantic-ir"], "obligation": "self", "command": {"argv": ["cargo", "test"]}}]
+    "provides": [
+      {"contract": "semantic-ir", "version": "1", "kind": "record-schema", "stability": "experimental", "fingerprint_sources": ["src/ir.rs", "src/canonical.rs"]},
+      {"contract": "typed-handoff", "version": "1", "kind": "record-schema", "stability": "experimental", "fingerprint_sources": ["language/mncs/ingest/handoff.mncs", "src/language.rs"]}
+    ],
+    "consumes": [{"contract": "mncs-language.source-profile", "envelope": {"op": "compatible-minor", "version": "0.14", "compatibility_ceiling": "0.18"}, "required": true, "evidence_refs": ["src/language.rs", "language/mncs/flow/"]}],
+    "tests": [{"test": "ingest-native-substrate", "covers": ["semantic-ir", "typed-handoff"], "obligation": "self", "command": {"argv": ["cargo", "test", "--test", "mncs_authority", "typed_store_handoff"]}}, {"test": "ingest-tests", "covers": ["semantic-ir"], "obligation": "scheduled", "command": {"argv": ["cargo", "test"]}}]
   }
 }

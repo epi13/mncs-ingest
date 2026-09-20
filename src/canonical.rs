@@ -46,9 +46,10 @@ pub struct Ingested {
     pub facts: CanonicalFacts,
 }
 
-/// Render a canonical object code to its singular spelling. This two-entry
-/// table mirrors `mncs.ingest.vocab` and exists only because MNCS cannot
-/// return strings; `vocab_contract` pins the two sides together.
+/// Render a canonical object code for the human-facing fragment projection.
+/// The semantic known/unknown decision is made by `mncs.ingest.handoff`; this
+/// table is only a bounded display spelling because MNCS returns bytes/codes,
+/// not Rust strings.
 pub fn object_label(code: i64) -> Option<&'static str> {
     match code {
         1 => Some("apple"),

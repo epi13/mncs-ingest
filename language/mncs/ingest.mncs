@@ -12,6 +12,7 @@ module mncs.ingest;
 use mncs.ingest.vocab as vocab;
 use mncs.ingest.parse as parse;
 use mncs.ingest.frame as frame;
+use mncs.ingest.handoff as handoff;
 use mncs.flow.lines as lines;
 use mncs.flow.fields as fields;
 use mncs.flow.frames as frames;
@@ -31,6 +32,22 @@ fn ingest_classify_event(word: [byte; up_to 64], length: u64) -> (result: i64) {
 
 fn ingest_classify_object(word: [byte; up_to 64], length: u64) -> (result: i64) {
     return vocab.classify_object(word, 0, length);
+}
+
+fn ingest_object_status(object_code: i64) -> (result: i64) {
+    return handoff.object_status(object_code) as i64;
+}
+
+fn ingest_object_spelling_matches(word: [byte; up_to 64], length: u64, object_code: i64) -> (result: i64) {
+    return select(vocab.object_spelling_matches(word, 0, length, object_code), 1, 0);
+}
+
+fn ingest_canonical_status(object_code: i64, quantity_present: bool) -> (result: i64) {
+    return handoff.canonical_status(object_code, quantity_present) as i64;
+}
+
+fn ingest_handoff_encode(semantic_type: u64, source_kind: u64, completeness: u64, lossiness: u64, source_identity: [byte; 32], semantic_identity: [byte; 32], producer_identity: [byte; 32], transformation_identity: [byte; 32]) -> (result: [byte; 164]) {
+    return handoff.encode_fields(semantic_type, source_kind, completeness, lossiness, source_identity, semantic_identity, producer_identity, transformation_identity);
 }
 
 // Structured/native path: validate extracted fields.

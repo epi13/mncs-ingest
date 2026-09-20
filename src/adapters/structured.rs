@@ -73,7 +73,7 @@ impl Adapter for StructuredAdapter {
                 non_empty(&word, ADAPTER, "object")?;
                 bound(&word, ADAPTER, "object")?;
                 let code = rt.classify_object(word.as_bytes())?;
-                if code == crate::ir::OBJECT_UNKNOWN {
+                if rt.object_status(code)? == 2 {
                     unknown_object = Some(word.as_bytes().to_vec());
                 }
                 code
@@ -141,13 +141,14 @@ impl Adapter for StructuredAdapter {
                 end: None,
             })
             .collect();
+        let canonical_status = rt.canonical_status(object_code, quantity.is_some())?;
         Ok(assemble(
             AdapterKind::Structured,
             "mncs.ingest/ingest_validate+classify",
             input,
             facts,
             spans,
-            object_code == crate::ir::OBJECT_UNKNOWN,
+            canonical_status == 2,
         ))
     }
 }

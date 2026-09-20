@@ -1,0 +1,16 @@
+{
+  "schema_version": "mncs.native-userland-audit/1",
+  "repository_id": "mncs-ingest",
+  "profile_revalidation": {
+    "historical_source_profile": ["0.13", "0.14"],
+    "minimum_profile_required_by_current_sources": "0.14",
+    "current_family_compatibility": "0.18",
+    "reason": "The flow modules use the 0.14 bounded copy/narrowing surface; the new handoff and transfer policy remain expressible at 0.13. No profile declaration was raised merely to claim 0.18."
+  },
+  "pressure_reclassification": [
+    {"legacy": "P-STRING-01", "status": "still_real", "note": "MNCS still returns bounded bytes/codes rather than an owned text value; the host retains a display spelling projection."},
+    {"legacy": "P-STRING-02", "status": "partially_resolved", "note": "0.14 copy/narrow operations are used; direct view sub-slicing remains absent."},
+    {"legacy": "P-PERF-01 / INGEST-P-010", "status": "partially_resolved", "note": "mncs-embed retained sessions exist upstream; Ingest has not made them the production adapter boundary in this slice."},
+    {"legacy": "INGEST-P-004", "status": "reframed", "note": "The transfer vocabulary remains a bounded native table; no new generic map pressure is opened for the handoff contract."}
+  ]
+}

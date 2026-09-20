@@ -6,6 +6,26 @@ current language (pin `f7c1ba3`, Source Profile 0.14) and carries the
 survivors forward as stable `INGEST-P-###` artifacts in the format a
 later `mncs-language` agent can execute directly.
 
+## Current substrate addendum (2026-09-20)
+
+The ledger below remains the historical reproducer record. The current
+Ingest authority boundary is narrower and is recorded in
+`native-userland-audit.json`: vocabulary/classification decisions,
+canonical status, bounded normalization, and the versioned typed Store
+handoff are native MNCS semantics; Rust remains the external parser,
+foreign-adapter, and compatibility carrier. In particular, the Rust
+`object_label` helper is now an explicit human-readable projection, not a
+second semantic vocabulary authority. The typed handoff is fixed-width and
+identity/provenance-bound; JSON remains external transport only.
+
+The repository inventory was compared with the current workspace language
+head `efa76ca47a5a65accf847230dedd6974ef40e39e`; the older pins in the
+historical rows are retained to keep their reproducers attributable.
+
+The retained-session performance pressure is therefore still a production
+adapter adoption item, not evidence that Ingest must invent a new language
+profile. The next consumer slice is direct Commons-pressure handoff.
+
 ## Reconciliation of prior-run pressures
 
 | Prior ID | New ID | Verdict | Note |
@@ -78,8 +98,10 @@ Type system / value model; standard library (validated-text wrapper).
 
 ## Acceptance test
 `ingest_parse` returns the source spelling as a value (not a span);
-`src/canonical.rs::object_label` is deleted with no replacement; the
-vocabulary contract test still passes.
+The native vocabulary/status decisions remain the authority and
+`src/canonical.rs::object_label` remains only as a human projection; the
+vocabulary contract test still passes without treating that projection as
+canonical semantic state.
 
 ---
 
@@ -487,5 +509,24 @@ Type system (capacity generics); standard library.
 folds; behavior and tests unchanged.
 
 ---
+
+## Profile 0.18 reconciliation (2026-09-20)
+
+The current family compatibility ceiling is Profile 0.18, but the ingest
+program's minimum required profile is 0.14: the flow modules use the 0.14
+copy/narrowing surface and the transfer/handoff policy remains expressible in
+0.13. The declaration is therefore not mechanically raised to 0.18.
+
+The first downstream contract is now `mncs.ingest.typed-handoff/1` in
+`language/mncs/ingest/handoff.mncs`. It carries source, semantic, producer,
+and transformation identities plus explicit completeness/lossiness lanes. JSON
+is still accepted by the structured adapter as external interchange; it is not
+the internal handoff representation.
+
+The native migration also removes one semantic duplicate: native adapter
+code/spelling compatibility now executes through `vocab.mncs`. Rust retains
+the foreign JSON/native parsing boundary and human-facing code-to-label
+projection. Retained `mncs-embed` is acknowledged as available but remains a
+follow-up adoption obligation for the production Ingest runtime.
 
 ## INGEST-P-012+ reserved for tranche C–H findings.

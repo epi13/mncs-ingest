@@ -51,9 +51,7 @@ impl Adapter for NativeAdapter {
         let object_spelling = match (input.object_code, input.object_spelling) {
             (1 | 2, Some(spelling)) => {
                 let canonical = object_label(input.object_code).unwrap_or_default();
-                if !spelling.eq_ignore_ascii_case(canonical)
-                    && !spelling.eq_ignore_ascii_case(&format!("{canonical}s"))
-                {
+                if !rt.object_spelling_matches(spelling.as_bytes(), input.object_code)? {
                     return Err(IngestError::ConflictingFields {
                         adapter: ADAPTER.to_owned(),
                         detail: format!(
@@ -86,6 +84,18 @@ impl Adapter for NativeAdapter {
                 ));
             }
         };
+
+        let object_status = rt.object_status(input.object_code)?;
+        if object_status == 3 {
+            return Err(IngestError::unsupported(
+                ADAPTER,
+                format!("unknown native object code {}", input.object_code),
+            ));
+        }
+        let canonical_status = rt.canonical_status(
+            input.object_code,
+            input.quantity.is_some(),
+        )?;
 
         match rt.validate(
             input.event_code,
@@ -147,7 +157,7 @@ impl Adapter for NativeAdapter {
             raw.as_bytes(),
             facts,
             spans,
-            input.object_code == crate::ir::OBJECT_UNKNOWN,
+            canonical_status == 2,
         ))
     }
 }

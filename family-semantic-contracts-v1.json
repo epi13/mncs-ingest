@@ -1,0 +1,27 @@
+{
+  "schema_version": "commons.mncs.semantic-contract-declarations/v1",
+  "repository_id": "mncs-ingest",
+  "revision": "1",
+  "provides": [
+    {
+      "contract_identity": "mncs.ingest.typed-handoff/1",
+      "contract_revision": "1",
+      "exported_identity": "mncs-ingest:typed-handoff",
+      "evidence": "language/mncs/ingest/handoff.mncs"
+    }
+  ],
+  "consumes": [
+    {
+      "contract_identity": "mncs.pressure-registry/1",
+      "contract_revision": "1",
+      "consumer_identity": "mncs-ingest:pressure-input",
+      "evidence": "src/adapters/structured.rs",
+      "verification": {
+        "check_identity": "mncs-ingest:pressure-registry-input",
+        "executor": "mncs-ingest",
+        "surface": "external-pressure-to-normalization",
+        "evidence": "family-verification-checks-v1.json"
+      }
+    }
+  ]
+}
