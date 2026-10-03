@@ -1,0 +1,47 @@
+{
+  "capabilities": [
+    {
+      "contract": "semantic-ir",
+      "fingerprint_sources": [
+        "src/ir.rs",
+        "src/canonical.rs"
+      ],
+      "kind": "record-schema",
+      "stability": "experimental",
+      "version": "1"
+    },
+    {
+      "contract": "typed-handoff",
+      "fingerprint_sources": [
+        "language/mncs/ingest/handoff.mncs",
+        "src/language.rs"
+      ],
+      "kind": "record-schema",
+      "stability": "experimental",
+      "version": "1"
+    }
+  ],
+  "dependencies": [
+    {
+      "contract": "mncs-language.source-profile",
+      "envelope": {
+        "compatibility_ceiling": "0.18",
+        "op": "compatible-minor",
+        "version": "0.14"
+      },
+      "evidence_refs": [
+        "src/language.rs",
+        "language/mncs/flow/"
+      ],
+      "required": true
+    }
+  ],
+  "entry": [
+    "cargo test"
+  ],
+  "purpose": "MNCS Ingest is the machine-native data ingestion and semantic-normalization boundary for the MNCS ecosystem. It converts external signals and representations into canonical typed structures, relations, context, and graph-ready semantic fragments for memory, models, agents, runtimes, and other MNCS systems.",
+  "repository": "mncs-ingest",
+  "schema_version": "mncs.project-view/1",
+  "source_identity": "sha256:3864e3007cc605fe2eb03765ade43c30833bda4a2e791d5f22331dd7bc29b691",
+  "structure": {}
+}
