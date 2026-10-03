@@ -1,5 +1,8 @@
 # MNCS Ingest
 
+<!-- MNCS:generated:begin -->
+<!-- MNCS:generated:end -->
+
 MNCS Ingest is the machine-native data ingestion and semantic-normalization boundary for the MNCS ecosystem. It converts external signals and representations into canonical typed structures, relations, context, and graph-ready semantic fragments for memory, models, agents, runtimes, and other MNCS systems.
 
 It is intentionally **not** a conventional tokenizer. The goal is to reduce dependence on surface-form token sequences by compiling heterogeneous observations toward a shared machine-native semantic representation.
